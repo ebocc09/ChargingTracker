@@ -1,0 +1,14 @@
+{
+  "name": "charging-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Supercharging dashboard tracking USOE per VIN against a target charge level, backed by Garage.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
