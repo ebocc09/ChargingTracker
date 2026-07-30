@@ -52,6 +52,16 @@ REM             triggered by "When a new email arrives". Only needed if the
 REM             flow URL is unavailable. See README.
 set "ALERT_TRANSPORT=webhook"
 
+REM Which Garage environment to start in. Leave this commented out for the
+REM normal case - the dashboard remembers whichever one you last picked in
+REM Admin, and the Production / Engineering switch stays available.
+REM
+REM Uncomment to PIN one environment. The switch is then disabled in the UI
+REM and the admin panel says why. Useful if this copy should only ever be
+REM allowed to touch engineering.
+REM   set "GARAGE_ENV=prod"
+REM   set "GARAGE_ENV=eng"
+
 "%NODE%" server.js
 
 echo.

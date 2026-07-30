@@ -17,6 +17,10 @@
      4. Token exchange / refresh      POST bouncer/oauth/token
      5. Authorised JSON-RPC           POST garage/mcp
 
+   That whole flow runs once per environment — Production and Engineering are
+   separate Garage instances with separate Bouncer registrations, and the
+   dashboard can be pointed at either from the admin panel.
+
    No secrets are baked in and nothing is shared between users — every person
    who clones this repo signs into Bouncer as themselves and receives their
    own token with their own Garage permissions.
@@ -39,9 +43,28 @@ const { exec, execFile } = require("node:child_process");
 const CONFIG = {
   port: Number(process.env.PORT || 3118),
 
-  // Which Garage instance to talk to. Override with GARAGE_URL for eu / cn /
-  // engineering environments — see README.
-  garageUrl: process.env.GARAGE_URL || "https://garage.vn.teslamotors.com",
+  /* The two Garage instances this can talk to. Both are defined up front;
+     exactly one is current at a time, chosen in the admin panel and
+     remembered in .garage.json.
+
+     Override either host for eu / cn with GARAGE_URL / GARAGE_ENG_URL, and
+     pin the starting environment with GARAGE_ENV=prod|eng — see README. */
+  environments: {
+    prod: {
+      key       : "prod",
+      label     : "Production",
+      garageUrl : process.env.GARAGE_URL || "https://garage.vn.teslamotors.com",
+      tokenFile : path.join(__dirname, ".tokens.json"),
+      clientFile: path.join(__dirname, ".client.json")
+    },
+    eng: {
+      key       : "eng",
+      label     : "Engineering",
+      garageUrl : process.env.GARAGE_ENG_URL || "https://garage.dev.teslamotors.com",
+      tokenFile : path.join(__dirname, ".tokens.eng.json"),
+      clientFile: path.join(__dirname, ".client.eng.json")
+    }
+  },
 
   // How far back to look for a USOE snapshot. Datatank serves cached
   // snapshots, so the vehicle does not need to be online right now.
@@ -55,8 +78,6 @@ const CONFIG = {
   // directly, still cannot fan out past this.
   maxConcurrent: Number(process.env.MAX_CONCURRENT || 4),
 
-  tokenFile: path.join(__dirname, ".tokens.json"),
-  clientFile: path.join(__dirname, ".client.json"),
   teamsFile : path.join(__dirname, ".teams.json"),
   garageFile: path.join(__dirname, ".garage.json"),
 
@@ -66,6 +87,12 @@ const CONFIG = {
   // read on every monitored vehicle goes through here.
   liveTtlMs        : Number(process.env.LIVE_TTL_MS || 10_000),
   liveMaxConcurrent: Number(process.env.LIVE_MAX_CONCURRENT || 4),
+
+  // How often to confirm the saved session cookie is still good. Deliberately
+  // infrequent: the probe is one redirect with no body, but there is nothing
+  // to gain from checking often — a Garage session lasts hours to days, and
+  // the only cost of noticing late is a few minutes of cached-only readings.
+  cookieCheckMs: Number(process.env.COOKIE_CHECK_MS || 15 * 60 * 1000),
 
   // How a charge-complete alert reaches Teams:
   //   "webhook" — POST the Adaptive Card straight to a Power Automate flow URL.
@@ -91,7 +118,6 @@ const CONFIG = {
   scope: "garage:mcp offline_access"
 };
 
-const MCP_URL      = CONFIG.garageUrl.replace(/\/+$/, "") + "/mcp";
 const REDIRECT_URI = `http://localhost:${CONFIG.port}/callback`;
 
 const log = (...a) => console.log("[charging-tracker]", ...a);
@@ -156,21 +182,108 @@ function readJson(file){
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
 function writeJson(file, obj){
+  // The mode is honoured on POSIX and silently ignored on Windows, where NTFS
+  // ACLs govern instead — these files are still per-user secrets either way.
   fs.writeFileSync(file, JSON.stringify(obj, null, 2), { mode: 0o600 });
 }
 
-let tokens = readJson(CONFIG.tokenFile);   // { access_token, refresh_token, expires_at }
-let client = readJson(CONFIG.clientFile);  // { client_id, client_secret? }
+/* ───────────────────────────── Environments ─────────────────────────────
+   Production and Engineering are two entirely separate Garage instances:
+   different hosts, different Bouncer registrations, different fleets. Every
+   piece of state that could leak across that boundary is held per
+   environment rather than globally — the OAuth client, the tokens, the MCP
+   session, all four caches, and the live-read session cookie.
+
+   The consequence worth relying on: switching is instant and lossless.
+   Signing in to Engineering does not sign you out of Production, and a VIN
+   read in one environment is never answered out of the other's cache.     */
+
+function makeEnv(def){
+  const base = def.garageUrl.replace(/\/+$/, "");
+  return {
+    def,
+    key      : def.key,
+    label    : def.label,
+    garageUrl: base,
+    mcpUrl   : base + "/mcp",
+
+    tokens: readJson(def.tokenFile),    // { access_token, refresh_token, expires_at }
+    client: readJson(def.clientFile),   // { client_id, client_secret? }
+
+    authServerMeta: null,
+    mcpSession    : null,
+    pending       : null,               // in-flight authorization-code exchange
+
+    cache        : new Map(),           // vin -> { cachedAt, value }
+    inFlightByVin: new Map(),           // vin -> Promise
+    geoCache     : new Map(),           // vin -> { at, value }
+    idCache      : new Map(),           // vin -> numeric Mothership id
+    liveCache    : new Map(),           // vin -> { at, value }
+
+    live: { cookie: "", enabled: false, lastError: null },
+
+    // Runtime health, deliberately NOT persisted — it describes this process's
+    // observations, not configuration, and writing it would rewrite
+    // .garage.json every quarter of an hour for nothing.
+    health: { lastCheck: null, lastOk: null, lastRead: null, checking: false }
+  };
+}
+
+const ENVS = Object.fromEntries(
+  Object.values(CONFIG.environments).map(def => [def.key, makeEnv(def)])
+);
+
+/* GARAGE_ENV pins the environment for this process; without it the last
+   choice made in the admin panel is restored from .garage.json. */
+const ENV_FORCED = process.env.GARAGE_ENV === "eng" || process.env.GARAGE_ENV === "prod";
+let currentEnvKey = ENV_FORCED ? process.env.GARAGE_ENV : "prod";
+
+const env      = () => ENVS[currentEnvKey];
+const envByKey = k  => ENVS[k] || null;
+
+/* .garage.json carries the live-read cookie for each environment plus the
+   last selected environment. Builds before this change wrote a single flat
+   { cookie, enabled, lastError }; that shape is migrated into Production,
+   which is the only environment those builds could talk to. */
+(function loadGarageFile(){
+  const raw = readJson(CONFIG.garageFile);
+  if(!raw) return;
+
+  if(!raw.envs && typeof raw.cookie === "string"){
+    ENVS.prod.live = {
+      cookie   : raw.cookie || "",
+      enabled  : Boolean(raw.enabled),
+      lastError: raw.lastError || null
+    };
+    log("migrated .garage.json to the per-environment format");
+    return;
+  }
+
+  for(const [key, saved] of Object.entries(raw.envs || {})){
+    if(!ENVS[key] || !saved) continue;
+    ENVS[key].live = {
+      cookie   : saved.cookie || "",
+      enabled  : Boolean(saved.enabled),
+      lastError: saved.lastError || null
+    };
+  }
+  if(!ENV_FORCED && raw.current && ENVS[raw.current]) currentEnvKey = raw.current;
+})();
+
+function saveGarageFile(){
+  writeJson(CONFIG.garageFile, {
+    current: currentEnvKey,
+    envs   : Object.fromEntries(Object.entries(ENVS).map(([k, e]) => [k, e.live]))
+  });
+}
 
 /* ───────────────────────────── OAuth: discovery ───────────────────────────── */
 
-let authServerMeta = null;
-
-async function discover(){
-  if(authServerMeta) return authServerMeta;
+async function discover(e){
+  if(e.authServerMeta) return e.authServerMeta;
 
   // Ask the resource which authorization server it trusts, per RFC 9728.
-  const prUrl = CONFIG.garageUrl.replace(/\/+$/, "") + "/.well-known/oauth-protected-resource";
+  const prUrl = e.garageUrl + "/.well-known/oauth-protected-resource";
   const pr = await request(prUrl, { headers: { Accept: "application/json" } });
   if(pr.status !== 200) throw new Error(`Protected-resource discovery failed (HTTP ${pr.status})`);
 
@@ -182,21 +295,21 @@ async function discover(){
   const as = await request(asUrl, { headers: { Accept: "application/json" } });
   if(as.status !== 200) throw new Error(`Authorization-server discovery failed (HTTP ${as.status})`);
 
-  authServerMeta = JSON.parse(as.body);
-  log("auth server:", authServerMeta.issuer);
-  return authServerMeta;
+  e.authServerMeta = JSON.parse(as.body);
+  log(`auth server (${e.key}):`, e.authServerMeta.issuer);
+  return e.authServerMeta;
 }
 
 /* ───────────────────────────── OAuth: registration ───────────────────────────── */
 
-async function ensureClient(){
-  if(client && client.client_id) return client;
+async function ensureClient(e){
+  if(e.client && e.client.client_id) return e.client;
 
-  const meta = await discover();
+  const meta = await discover(e);
   if(!meta.registration_endpoint) throw new Error("Bouncer does not expose dynamic client registration");
 
   const res = await postJson(meta.registration_endpoint, {
-    client_name               : "Charging Tracker",
+    client_name               : `Charging Tracker (${e.label})`,
     redirect_uris             : [REDIRECT_URI],
     grant_types               : ["authorization_code", "refresh_token"],
     response_types            : ["code"],
@@ -208,101 +321,101 @@ async function ensureClient(){
     throw new Error(`Client registration failed (HTTP ${res.status}): ${res.body.slice(0, 400)}`);
   }
 
-  client = JSON.parse(res.body);
-  writeJson(CONFIG.clientFile, client);
-  log("registered OAuth client:", client.client_id);
-  return client;
+  e.client = JSON.parse(res.body);
+  writeJson(e.def.clientFile, e.client);
+  log(`registered OAuth client (${e.key}):`, e.client.client_id);
+  return e.client;
 }
 
 /* ───────────────────────────── OAuth: authorization code + PKCE ───────────────────────────── */
 
 const b64url = buf => buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-let pending = null;   // { verifier, state, resolve, reject }
-
-async function buildAuthorizeUrl(){
-  const meta = await discover();
-  await ensureClient();
+async function buildAuthorizeUrl(e){
+  const meta = await discover(e);
+  await ensureClient(e);
 
   const verifier  = b64url(crypto.randomBytes(48));
   const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
-  const state     = b64url(crypto.randomBytes(16));
 
-  pending = { verifier, state };
+  // The environment key rides in the state parameter so /callback can route
+  // the code back to the right environment — two sign-ins can be in flight
+  // in two tabs without landing on each other.
+  const state = e.key + "." + b64url(crypto.randomBytes(16));
+
+  e.pending = { verifier, state };
 
   const params = new URLSearchParams({
     response_type        : "code",
-    client_id            : client.client_id,
+    client_id            : e.client.client_id,
     redirect_uri         : REDIRECT_URI,
     scope                : CONFIG.scope,
     state,
     code_challenge       : challenge,
     code_challenge_method: "S256",
     // RFC 8707 — bind the token to this specific MCP resource.
-    resource             : MCP_URL
+    resource             : e.mcpUrl
   });
 
   return meta.authorization_endpoint + "?" + params.toString();
 }
 
-async function exchangeCode(code){
-  const meta = await discover();
+async function exchangeCode(e, code){
+  const meta = await discover(e);
   const res = await postForm(meta.token_endpoint, {
     grant_type   : "authorization_code",
     code,
     redirect_uri : REDIRECT_URI,
-    client_id    : client.client_id,
-    code_verifier: pending.verifier,
-    resource     : MCP_URL
+    client_id    : e.client.client_id,
+    code_verifier: e.pending.verifier,
+    resource     : e.mcpUrl
   });
   if(res.status !== 200) throw new Error(`Token exchange failed (HTTP ${res.status}): ${res.body.slice(0, 400)}`);
-  storeTokens(JSON.parse(res.body));
+  storeTokens(e, JSON.parse(res.body));
 }
 
-async function refreshTokens(){
-  if(!tokens || !tokens.refresh_token) return false;
-  const meta = await discover();
+async function refreshTokens(e){
+  if(!e.tokens || !e.tokens.refresh_token) return false;
+  const meta = await discover(e);
   const res = await postForm(meta.token_endpoint, {
     grant_type   : "refresh_token",
-    refresh_token: tokens.refresh_token,
-    client_id    : client.client_id,
-    resource     : MCP_URL
+    refresh_token: e.tokens.refresh_token,
+    client_id    : e.client.client_id,
+    resource     : e.mcpUrl
   });
   if(res.status !== 200){
-    warn("refresh failed (HTTP " + res.status + ") — re-authentication required");
-    tokens = null;
-    try { fs.unlinkSync(CONFIG.tokenFile); } catch {}
+    warn(`refresh failed for ${e.key} (HTTP ${res.status}) — re-authentication required`);
+    e.tokens = null;
+    try { fs.unlinkSync(e.def.tokenFile); } catch {}
     return false;
   }
-  storeTokens(JSON.parse(res.body));
-  log("access token refreshed");
+  storeTokens(e, JSON.parse(res.body));
+  log(`access token refreshed (${e.key})`);
   return true;
 }
 
-function storeTokens(t){
-  tokens = {
+function storeTokens(e, t){
+  e.tokens = {
     access_token : t.access_token,
-    refresh_token: t.refresh_token || (tokens && tokens.refresh_token) || null,
+    refresh_token: t.refresh_token || (e.tokens && e.tokens.refresh_token) || null,
     // Renew a minute early so a call never lands on an expiring token.
     expires_at   : Date.now() + ((t.expires_in || 3600) - 60) * 1000
   };
-  writeJson(CONFIG.tokenFile, tokens);
-  mcpSession = null;   // a new identity needs a new MCP session
+  writeJson(e.def.tokenFile, e.tokens);
+  e.mcpSession = null;   // a new identity needs a new MCP session
 }
 
-async function accessToken(){
-  if(tokens && tokens.access_token && Date.now() < tokens.expires_at) return tokens.access_token;
-  if(tokens && tokens.refresh_token && await refreshTokens()) return tokens.access_token;
+async function accessToken(e){
+  if(e.tokens && e.tokens.access_token && Date.now() < e.tokens.expires_at) return e.tokens.access_token;
+  if(e.tokens && e.tokens.refresh_token && await refreshTokens(e)) return e.tokens.access_token;
   return null;
 }
 
-const isAuthed = () => Boolean(tokens && tokens.access_token);
+const isAuthed = e => Boolean(e.tokens && e.tokens.access_token);
 
 /* ───────────────────────────── MCP client ─────────────────────────────
    Streamable HTTP transport. Responses arrive either as plain JSON or as
    an SSE stream, so both shapes have to be handled.                      */
-
-let mcpSession = null;
 
 function parseMcpBody(res){
   const ctype = String(res.headers["content-type"] || "");
@@ -320,38 +433,44 @@ function parseMcpBody(res){
   return JSON.parse(res.body);
 }
 
-async function mcpRpc(method, params, { isNotification = false } = {}){
-  const token = await accessToken();
-  if(!token){ const e = new Error("Not authenticated with Garage"); e.needsAuth = true; throw e; }
+async function mcpRpc(e, method, params, { isNotification = false } = {}){
+  const token = await accessToken(e);
+  if(!token){
+    const err = new Error(`Not authenticated with Garage (${e.label})`);
+    err.needsAuth = true; err.env = e.key;
+    throw err;
+  }
 
   const headers = {
     "Authorization"       : "Bearer " + token,
     "MCP-Protocol-Version": CONFIG.mcpProtocolVersion
   };
-  if(mcpSession) headers["Mcp-Session-Id"] = mcpSession;
+  if(e.mcpSession) headers["Mcp-Session-Id"] = e.mcpSession;
 
   const payload = isNotification
     ? { jsonrpc: "2.0", method, params }
     : { jsonrpc: "2.0", id: crypto.randomUUID(), method, params };
 
-  const res = await postJson(MCP_URL, payload, headers);
+  const res = await postJson(e.mcpUrl, payload, headers);
 
   if(res.status === 401){
     // Token rejected — try one refresh, then give up and ask for a login.
-    mcpSession = null;
-    if(await refreshTokens()) return mcpRpc(method, params, { isNotification });
-    const e = new Error("Garage rejected the access token"); e.needsAuth = true; throw e;
+    e.mcpSession = null;
+    if(await refreshTokens(e)) return mcpRpc(e, method, params, { isNotification });
+    const err = new Error(`Garage rejected the access token (${e.label})`);
+    err.needsAuth = true; err.env = e.key;
+    throw err;
   }
-  if(res.status === 404 && mcpSession){
+  if(res.status === 404 && e.mcpSession){
     // Session expired server-side; re-initialize and retry once.
-    mcpSession = null;
-    await mcpInit();
-    return mcpRpc(method, params, { isNotification });
+    e.mcpSession = null;
+    await mcpInit(e);
+    return mcpRpc(e, method, params, { isNotification });
   }
   if(res.status >= 400) throw new Error(`Garage MCP returned HTTP ${res.status}: ${res.body.slice(0, 300)}`);
 
   const sid = res.headers["mcp-session-id"];
-  if(sid) mcpSession = sid;
+  if(sid) e.mcpSession = sid;
 
   if(isNotification || res.status === 202 || !res.body.trim()) return null;
 
@@ -360,20 +479,20 @@ async function mcpRpc(method, params, { isNotification = false } = {}){
   return parsed.result;
 }
 
-async function mcpInit(){
-  if(mcpSession) return;
-  await mcpRpc("initialize", {
+async function mcpInit(e){
+  if(e.mcpSession) return;
+  await mcpRpc(e, "initialize", {
     protocolVersion: CONFIG.mcpProtocolVersion,
     capabilities   : {},
-    clientInfo     : { name: "charging-tracker", version: "1.0.0" }
+    clientInfo     : { name: "charging-tracker", version: "1.1.0" }
   });
-  await mcpRpc("notifications/initialized", {}, { isNotification: true });
-  log("MCP session established");
+  await mcpRpc(e, "notifications/initialized", {}, { isNotification: true });
+  log(`MCP session established (${e.key})`);
 }
 
-async function callTool(name, args){
-  await mcpInit();
-  const result = await mcpRpc("tools/call", { name, arguments: args });
+async function callTool(e, name, args){
+  await mcpInit(e);
+  const result = await mcpRpc(e, "tools/call", { name, arguments: args });
 
   if(result && result.isError){
     const text = (result.content || []).map(c => c.text).filter(Boolean).join(" ");
@@ -391,10 +510,10 @@ async function callTool(name, args){
    and SOC are two separate columns in Garage — USOE is the customer-facing
    number and the one this dashboard tracks.                              */
 
-const cache = new Map();   // vin -> { cachedAt, value }
-
 /* Counting semaphore. Callers queue rather than being rejected, so a burst
-   is slowed down instead of dropped. */
+   is slowed down instead of dropped. Deliberately global rather than
+   per-environment: it exists to protect this process's own socket budget,
+   and only one environment is ever being polled at a time.               */
 let inFlight = 0;
 const waiting = [];
 
@@ -411,10 +530,6 @@ async function withSlot(fn){
     if(next) next();
   }
 }
-
-/* Collapse concurrent requests for the same VIN into one Garage call —
-   with 100 VINs across a couple of tabs this saves a lot of duplicate work. */
-const inFlightByVin = new Map();
 
 /* Shape returned by device_historical_vitals:
      { count, hours, asc,
@@ -457,16 +572,16 @@ function extractUsoe(payload){
   return null;
 }
 
-async function getUsoe(vin){
-  const hit = cache.get(vin);
+async function getUsoe(e, vin){
+  const hit = e.cache.get(vin);
   if(hit && Date.now() - hit.cachedAt < CONFIG.cacheTtlMs) return hit.value;
 
   // Already fetching this VIN? Join that request rather than issuing a second.
-  const pendingCall = inFlightByVin.get(vin);
+  const pendingCall = e.inFlightByVin.get(vin);
   if(pendingCall) return pendingCall;
 
   const call = withSlot(async () => {
-    const payload = await callTool("device_historical_vitals", {
+    const payload = await callTool(e, "device_historical_vitals", {
       device_id: vin,
       fields   : ["USOE"],
       hours    : CONFIG.lookbackHours,
@@ -483,11 +598,11 @@ async function getUsoe(vin){
       readingAt : found.at,
       samples   : payload.count ?? (payload.rows || []).length
     };
-    cache.set(vin, { cachedAt: Date.now(), value });
+    e.cache.set(vin, { cachedAt: Date.now(), value });
     return value;
-  }).finally(() => inFlightByVin.delete(vin));
+  }).finally(() => e.inFlightByVin.delete(vin));
 
-  inFlightByVin.set(vin, call);
+  e.inFlightByVin.set(vin, call);
   return call;
 }
 
@@ -501,15 +616,14 @@ async function getUsoe(vin){
    list costs two queries instead of a hundred — which matters given how
    carefully the rest of the polling is throttled.                          */
 
-const geoCache = new Map();   // vin -> { at, value }
 const GEO_TTL  = Number(process.env.GEO_TTL_MS || 5 * 60 * 1000);
 const GEO_CHUNK = 50;
 
-async function getGeofences(vins){
+async function getGeofences(e, vins){
   const out = {}, need = [];
 
   for(const vin of vins){
-    const hit = geoCache.get(vin);
+    const hit = e.geoCache.get(vin);
     if(hit && Date.now() - hit.at < GEO_TTL) out[vin] = hit.value;
     else need.push(vin);
   }
@@ -517,7 +631,7 @@ async function getGeofences(vins){
   for(let i = 0; i < need.length; i += GEO_CHUNK){
     const chunk = need.slice(i, i + GEO_CHUNK);
 
-    const payload = await withSlot(() => callTool("tesladex_search", {
+    const payload = await withSlot(() => callTool(e, "tesladex_search", {
       query : "vin:(" + chunk.join(" OR ") + ")",
       fields: ["vin", "trt_id", "tesla_facility"],
       size  : chunk.length
@@ -535,7 +649,7 @@ async function getGeofences(vins){
         site : fac && fac.sub_name ? fac.sub_name : null,
         type : fac && fac.type     ? fac.type     : null
       };
-      geoCache.set(r.vin, { at: Date.now(), value });
+      e.geoCache.set(r.vin, { at: Date.now(), value });
       out[r.vin] = value;
       seen.add(r.vin);
     }
@@ -545,7 +659,7 @@ async function getGeofences(vins){
     for(const vin of chunk){
       if(seen.has(vin)) continue;
       const value = { trtId: null, name: null, site: null, type: null };
-      geoCache.set(vin, { at: Date.now(), value });
+      e.geoCache.set(vin, { at: Date.now(), value });
       out[vin] = value;
     }
   }
@@ -558,6 +672,10 @@ async function getGeofences(vins){
    That endpoint is session-authenticated: a Bouncer token gets exactly the
    same 401 as sending no credential at all, so it needs a cookie copied out
    of a signed-in browser. That is why this is opt-in and off by default.
+
+   The cookie is held PER ENVIRONMENT. A production Garage session is not
+   valid against garage.dev and vice versa, so each has its own — turning
+   live read on in one says nothing about the other.
 
    Two measured properties shape how it is used:
 
@@ -575,20 +693,14 @@ async function getGeofences(vins){
    Every failure falls back to the cached path rather than surfacing an
    error — live reading is an accelerator, never a dependency.            */
 
-let live = readJson(CONFIG.garageFile) || { cookie: "", enabled: false, lastError: null };
-
-const liveReady = () => Boolean(live.enabled && live.cookie);
-
-function saveLive(){ writeJson(CONFIG.garageFile, live); }
+const liveReady = e => Boolean(e.live.enabled && e.live.cookie);
 
 /* VIN -> numeric Mothership id. The live endpoint is addressed by id, not
    VIN. Ids never change, so this is cached for the life of the process. */
-const idCache = new Map();
+async function deviceIdFor(e, vin){
+  if(e.idCache.has(vin)) return e.idCache.get(vin);
 
-async function deviceIdFor(vin){
-  if(idCache.has(vin)) return idCache.get(vin);
-
-  const payload = await withSlot(() => callTool("tesladex_search", {
+  const payload = await withSlot(() => callTool(e, "tesladex_search", {
     query : "vin:" + vin,
     fields: ["vin", "id"],
     size  : 1
@@ -597,7 +709,7 @@ async function deviceIdFor(vin){
   const row = ((payload && (payload.results || payload.rows)) || [])[0];
   if(!row || row.id == null) throw new Error(`Tesladex has no numeric id for ${vin}`);
 
-  idCache.set(vin, String(row.id));
+  e.idCache.set(vin, String(row.id));
   return String(row.id);
 }
 
@@ -619,18 +731,16 @@ async function withLiveSlot(fn){
   }
 }
 
-const liveCache = new Map();   // vin -> { at, value }
+async function getLiveUsoe(e, vin){
+  if(!e.live.cookie) throw new Error(`No ${e.label} session cookie saved`);
 
-async function getLiveUsoe(vin){
-  if(!live.cookie) throw new Error("No Garage session cookie saved");
-
-  const hit = liveCache.get(vin);
+  const hit = e.liveCache.get(vin);
   if(hit && Date.now() - hit.at < CONFIG.liveTtlMs) return hit.value;
 
-  const id  = await deviceIdFor(vin);
+  const id  = await deviceIdFor(e, vin);
   const res = await withLiveSlot(() => request(
-    `${CONFIG.garageUrl.replace(/\/+$/, "")}/vehicles/${id}/vitals`,
-    { headers: { Accept: "application/json", Cookie: live.cookie,
+    `${e.garageUrl}/vehicles/${id}/vitals`,
+    { headers: { Accept: "application/json", Cookie: e.live.cookie,
                  "User-Agent": "Mozilla/5.0 (charging-tracker)" } }
   ));
 
@@ -638,11 +748,11 @@ async function getLiveUsoe(vin){
     // Garage sessions expire on their own schedule. Switch live off rather
     // than hammering with a dead cookie; the admin panel reports this and
     // asks for a fresh one.
-    live.enabled   = false;
-    live.lastError = "Session cookie expired or was rejected — paste a fresh one.";
-    liveCache.clear();
-    saveLive();
-    const e = new Error(live.lastError); e.liveExpired = true; throw e;
+    e.live.enabled   = false;
+    e.live.lastError = `${e.label} session cookie expired or was rejected — paste a fresh one.`;
+    e.liveCache.clear();
+    saveGarageFile();
+    const err = new Error(e.live.lastError); err.liveExpired = true; throw err;
   }
   if(res.status >= 400) throw new Error(`Live vitals returned HTTP ${res.status}`);
 
@@ -657,12 +767,138 @@ async function getLiveUsoe(vin){
     usoe     : Math.max(0, Math.min(100, usoe)),
     soc      : Number.isFinite(Number(body.SOC)) ? Number(body.SOC) : null,
     readingAt: body.timestamp || null,
+    // Charge-port proximity — the "Proximity: DISCONNECTED / LATCHED" line in
+    // Garage's vitals tab. This is a LIVE-ONLY field: the cached historical
+    // vitals set carries no CP_* columns at all (only the unrelated `cp_type`
+    // config value), so with live read off it is simply unknowable and the
+    // dashboard has to treat it as such.
+    //
+    // Deliberately NOT CP_latchState — that reads ENGAGED on a car with
+    // nothing plugged in at all, because it describes the latch mechanism
+    // rather than whether a connector is present. Verified against a parked
+    // vehicle reporting CP_proximity DISCONNECTED and CP_latchState ENGAGED
+    // simultaneously. Using it would have flagged every idle car.
+    proximity: typeof body.CP_proximity === "string"
+                 ? body.CP_proximity.trim().toUpperCase() : null,
+
+    // Pack current in amps. Negative is discharge, positive is energy going
+    // in. Reported as a STRING ("-0.500") in BMS_packCurrent and as a number
+    // in bms_current — prefer the former, fall back to the latter, and let
+    // anything unparseable become null rather than 0, which would read as a
+    // measurement of "not charging".
+    packAmps : (() => {
+      const raw = body.BMS_packCurrent ?? body.bms_current;
+      const n   = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    })(),
+
     live     : true
   };
 
-  if(live.lastError){ live.lastError = null; saveLive(); }
-  liveCache.set(vin, { at: Date.now(), value });
+  if(e.live.lastError){ e.live.lastError = null; saveGarageFile(); }
+  // A successful read is the strongest possible proof the cookie is alive,
+  // and it is what makes the admin indicator read "active" rather than merely
+  // "configured".
+  e.health.lastOk = e.health.lastRead = Date.now();
+  e.liveCache.set(vin, { at: Date.now(), value });
   return value;
+}
+
+/* ── Cookie health ─────────────────────────────────────────────────────
+   A dead cookie used to be discovered only when a live read happened to hit
+   an AWAKE vehicle: a sleeping car answers 408 whether the session is good or
+   not, so a fleet that is all asleep would 408 forever and never reveal that
+   the cookie had expired hours ago.
+
+   This probes it directly. GET / on Garage answers 302 either way, but the
+   destination gives it away — /vehicles when the session is live,
+   /users/sign_in when it is not. Verified against a valid cookie, a corrupted
+   one and no cookie at all. It is a redirect with no body and touches no
+   vehicle, so it cannot wake anything or be confused with a 408.            */
+const SIGN_IN_RE = /\/users\/sign_in/;
+
+async function checkCookie(e){
+  if(!e.live.cookie || e.health.checking) return null;
+  e.health.checking = true;
+
+  try{
+    const res = await request(e.garageUrl + "/", {
+      headers: { Accept: "text/html,application/json",
+                 Cookie: e.live.cookie,
+                 "User-Agent": "Mozilla/5.0 (charging-tracker)" }
+    });
+
+    e.health.lastCheck = Date.now();
+    const dead = res.status === 401 || res.status === 403 ||
+                 SIGN_IN_RE.test(String(res.headers.location || ""));
+
+    if(dead){
+      const wasEnabled = e.live.enabled;
+      e.live.enabled   = false;
+      e.live.lastError = `${e.label} session cookie has expired — time for a refresh.`;
+      e.liveCache.clear();
+      saveGarageFile();
+      if(wasEnabled) warn(`${e.key} session cookie expired — live read switched off`);
+      return false;
+    }
+
+    e.health.lastOk = Date.now();
+    if(e.live.lastError){ e.live.lastError = null; saveGarageFile(); }
+    return true;
+
+  }catch(err){
+    // A network failure says nothing about the cookie — off VPN, Garage down.
+    // Record the attempt and change no state; guessing here would switch live
+    // read off every time the laptop briefly lost its connection.
+    e.health.lastCheck = Date.now();
+    return null;
+  }finally{
+    e.health.checking = false;
+  }
+}
+
+function startCookieWatch(){
+  const sweep = async () => {
+    for(const e of Object.values(ENVS)){
+      if(e.live.cookie) await checkCookie(e).catch(() => {});
+    }
+  };
+  // Shortly after boot as well as on the interval, so a cookie that died
+  // overnight is reported before the first sweep rather than after it.
+  setTimeout(sweep, 8_000).unref?.();
+  setInterval(sweep, CONFIG.cookieCheckMs).unref?.();
+}
+
+/* Shape the admin panel reads for one environment. */
+function liveStatusOf(e){
+  return {
+    env       : e.key,
+    label     : e.label,
+    configured: Boolean(e.live.cookie),
+    enabled   : Boolean(e.live.enabled),
+    ready     : liveReady(e),
+    lastError : e.live.lastError || null,
+    // Health, for the activity indicator in the admin panel.
+    lastCheck : e.health.lastCheck,
+    lastOk    : e.health.lastOk,
+    lastRead  : e.health.lastRead,
+    checkEvery: CONFIG.cookieCheckMs
+  };
+}
+
+function envSummary(){
+  return {
+    current: currentEnvKey,
+    forced : ENV_FORCED,
+    environments: Object.values(ENVS).map(e => ({
+      key          : e.key,
+      label        : e.label,
+      garageUrl    : e.garageUrl,
+      authenticated: isAuthed(e),
+      loginUrl     : `http://localhost:${CONFIG.port}/auth/login?env=${e.key}`,
+      live         : liveStatusOf(e)
+    }))
+  };
 }
 
 /* ───────────────────────────── Microsoft Teams ─────────────────────────────
@@ -678,6 +914,12 @@ async function getLiveUsoe(vin){
 let teams = readJson(CONFIG.teamsFile) || { url: process.env.TEAMS_WEBHOOK_URL || "", alerted: {} };
 if(process.env.TEAMS_WEBHOOK_URL) teams.url = process.env.TEAMS_WEBHOOK_URL;
 
+/* Master switch, independent of whether a webhook is configured. Clearing the
+   URL also stops alerts, but it throws the configuration away — this is the
+   mute button: keep the flow wired up, just stop posting to it. Defaults to
+   on so an existing install behaves exactly as before. */
+if(typeof teams.muted !== "boolean") teams.muted = false;
+
 const teamsConfigured = () => Boolean(teams.url);
 
 function saveTeams(){
@@ -690,7 +932,7 @@ function saveTeams(){
 }
 
 /* Adaptive Card in the envelope the Workflows trigger forwards verbatim. */
-function chargeCompleteCard({ vin, usoe, limit, readingAt }){
+function chargeCompleteCard({ vin, usoe, limit, readingAt, envLabel }){
   // Labelled SOC because that is what people say, but the value is USOE —
   // see the USOE lookup section for why the two are not interchangeable.
   // `readingAt` is still carried in the flat fields below for the flow.
@@ -698,6 +940,9 @@ function chargeCompleteCard({ vin, usoe, limit, readingAt }){
     { title: "SOC",    value: `${Number(usoe).toFixed(1)}%` },
     { title: "Target", value: `${Number(limit).toFixed(1)}%` }
   ];
+  // Only ever stated when it isn't production, so the ordinary card is
+  // unchanged and an engineering card can't be mistaken for a real one.
+  if(envLabel && envLabel !== "Production") facts.push({ title: "Environment", value: envLabel });
 
   return {
     type: "message",
@@ -724,7 +969,60 @@ function chargeCompleteCard({ vin, usoe, limit, readingAt }){
       }
     }],
     // Flat copies so a hand-built flow can read the values directly.
-    event: "charge_complete", vin, usoe, limit, readingAt
+    event: "charge_complete", vin, usoe, limit, readingAt, environment: envLabel || null
+  };
+}
+
+/* Charge finished but the connector is still latched — the car is occupying a
+   stall it no longer needs. Same envelope as the completion card so an
+   existing flow renders it with no changes, but coloured Attention (red) and
+   headed differently, because this one is asking someone to go and do
+   something rather than reporting good news.
+
+   `reminderIndex` counts up across repeats, and is what stops the dedupe in
+   /api/notify from swallowing the second and subsequent reminders. */
+function stillLatchedCard({ vin, usoe, limit, readingAt, envLabel, reminderIndex, minutes }){
+  const facts = [
+    { title: "SOC",    value: `${Number(usoe).toFixed(1)}%` },
+    { title: "Target", value: `${Number(limit).toFixed(1)}%` },
+    { title: "Status", value: "Charge complete · still latched" }
+  ];
+  if(Number.isFinite(minutes) && minutes > 0){
+    facts.push({ title: "Latched for", value: minutes < 60
+      ? `${Math.round(minutes)} min`
+      : `${Math.floor(minutes / 60)}h ${Math.round(minutes % 60)}m` });
+  }
+  if(envLabel && envLabel !== "Production") facts.push({ title: "Environment", value: envLabel });
+
+  return {
+    type: "message",
+    attachments: [{
+      contentType: "application/vnd.microsoft.card.adaptive",
+      content: {
+        type: "AdaptiveCard",
+        $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+        version: "1.4",
+        body: [
+          { type: "ColumnSet", columns: [
+            { type: "Column", width: "auto", items: [
+              { type: "TextBlock", text: "🔌", size: "ExtraLarge", spacing: "None" }]},
+            { type: "Column", width: "stretch", items: [
+              { type: "TextBlock", text: "Still plugged in", weight: "Bolder",
+                size: "Medium", color: "Attention", spacing: "None" },
+              { type: "TextBlock", text: "Charging Tracker | Powered by Zo' Projects",
+                isSubtle: true, size: "Small", spacing: "None", wrap: true }]}
+          ]},
+          { type: "TextBlock", text: vin, size: "Large", weight: "Bolder",
+            wrap: true, fontType: "Monospace", spacing: "Medium" },
+          { type: "TextBlock", color: "Attention", wrap: true, spacing: "Small",
+            text: "This vehicle finished charging and is still latched to the Supercharger. "
+                + "Reminders repeat until it is unplugged." },
+          { type: "FactSet", facts }
+        ]
+      }
+    }],
+    event: "still_latched", vin, usoe, limit, readingAt,
+    reminderIndex: reminderIndex || 1, environment: envLabel || null
   };
 }
 
@@ -819,17 +1117,28 @@ function alertEmailBody(f){
             "--CT-END--"].join("\r\n");
   }
 
-  const lines = [
-    "Charging complete.",
-    "",
+  const lines = f.stillLatched
+    ? ["STILL PLUGGED IN.",
+       "",
+       "This vehicle finished charging and is still latched to the Supercharger.",
+       ""]
+    : ["Charging complete.", ""];
+
+  lines.push(
     `VIN       ${f.vin}`,
     `USOE      ${Number(f.usoe).toFixed(1)}%`,
     `Target    ${Number(f.limit).toFixed(1)}%`
-  ];
+  );
+  if(f.stillLatched) lines.push(`Reminder  #${f.reminderIndex || 1}`);
+  if(f.envLabel && f.envLabel !== "Production") lines.push(`Env       ${f.envLabel}`);
   if(f.readingAt) lines.push(`Reported  ${String(f.readingAt).replace("T", " ")} UTC`);
+
   lines.push("", "Sent by Charging Tracker.", "", "--CT-JSON--",
-    JSON.stringify({ event: "charge_complete", vin: f.vin, usoe: f.usoe,
-                     limit: f.limit, readingAt: f.readingAt || null }),
+    JSON.stringify({ event: f.stillLatched ? "still_latched" : "charge_complete",
+                     vin: f.vin, usoe: f.usoe, limit: f.limit,
+                     readingAt: f.readingAt || null,
+                     reminderIndex: f.stillLatched ? (f.reminderIndex || 1) : undefined,
+                     environment: f.envLabel || null }),
     "--CT-END--");
   return lines.join("\r\n");
 }
@@ -841,8 +1150,10 @@ function sendViaOutlook(f){
 
   const subject = f.text
     ? `${CONFIG.alertSubjectTag} test message`
-    : `${CONFIG.alertSubjectTag} ${f.vin} complete ` +
-      `${Number(f.usoe).toFixed(1)}/${Number(f.limit).toFixed(1)}`;
+    : f.stillLatched
+      ? `${CONFIG.alertSubjectTag} ${f.vin} STILL LATCHED (reminder ${f.reminderIndex || 1})`
+      : `${CONFIG.alertSubjectTag} ${f.vin} complete ` +
+        `${Number(f.usoe).toFixed(1)}/${Number(f.limit).toFixed(1)}`;
 
   return new Promise((resolve, reject) => {
     execFile("powershell.exe",
@@ -879,13 +1190,17 @@ function activeTransport(){
   return teamsConfigured() ? "webhook" : "outlook";
 }
 
-/* Whether an alert has anywhere to go. The Outlook transport needs no setup
-   beyond a working Outlook profile, so it is always considered ready. */
-const alertsEnabled = () => activeTransport() === "outlook" || teamsConfigured();
+/* Whether an alert has anywhere to go AND is allowed to go there. The Outlook
+   transport needs no setup beyond a working Outlook profile, so it is always
+   considered ready; the mute switch overrides either transport. */
+const alertsEnabled = () =>
+  !teams.muted && (activeTransport() === "outlook" || teamsConfigured());
 
 async function deliverAlert(f){
   if(activeTransport() === "outlook") return sendViaOutlook(f);
-  return postToTeams(f.text ? plainMessage(f.text) : chargeCompleteCard(f));
+  if(f.text)      return postToTeams(plainMessage(f.text));
+  if(f.stillLatched) return postToTeams(stillLatchedCard(f));
+  return postToTeams(chargeCompleteCard(f));
 }
 
 /* ───────────────────────────── HTTP server ───────────────────────────── */
@@ -923,12 +1238,17 @@ function sendHtml(res, status, html){
   res.end(html);
 }
 
+/* Credential files, whichever environment they belong to, are never served.
+   Matched by prefix rather than by an exact list so a future .tokens.<env>
+   cannot be exposed by being forgotten here. */
+const SECRET_FILE = /(^|[\\/])\.(tokens|client|teams|garage)(\.[a-z0-9]+)?\.json$/i;
+
 function serveStatic(req, res, pathname){
   const rel  = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const file = path.join(__dirname, rel);
 
   // Never serve outside the project directory, or the credential files.
-  if(!file.startsWith(__dirname) || /(^|[\\/])\.(tokens|client|teams|garage)\.json$/.test(file)){
+  if(!file.startsWith(__dirname) || SECRET_FILE.test(file)){
     res.writeHead(403); return res.end("Forbidden");
   }
   fs.readFile(file, (err, data) => {
@@ -951,12 +1271,41 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  /* ── environment: read / switch ── */
+  if(p === "/api/env"){
+    if(req.method === "GET") return sendJson(res, 200, envSummary());
+
+    if(req.method === "POST"){
+      if(ENV_FORCED){
+        return sendJson(res, 409, {
+          error: `Environment is pinned to ${env().label} by GARAGE_ENV — unset it to switch from the dashboard.`,
+          ...envSummary()
+        });
+      }
+      const want = String((await readBodyOf(req)).env || "").trim();
+      if(!envByKey(want)) return sendJson(res, 400, { error: `Unknown environment "${want}"` });
+
+      if(want !== currentEnvKey){
+        currentEnvKey = want;
+        saveGarageFile();
+        log("environment switched to", env().label, `(${env().garageUrl})`);
+      }
+      return sendJson(res, 200, envSummary());
+    }
+
+    res.writeHead(405); return res.end("Method not allowed");
+  }
+
   /* ── USOE for one VIN ── */
   if(p === "/api/usoe"){
     const vin = (url.searchParams.get("vin") || "").trim().toUpperCase();
     if(!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)){
       return sendJson(res, 400, { error: "A valid 17-character VIN is required" });
     }
+    // Pinned for the duration of the call so a switch mid-sweep can never
+    // attribute one environment's reading to the other.
+    const e = env();
+
     // The page asks for a live read only where it is worth 140 KB — normally
     // a vehicle close to its limit. Any live failure falls through to the
     // cached path, so this can never make the dashboard worse than before.
@@ -965,16 +1314,21 @@ const server = http.createServer(async (req, res) => {
     try{
       let r = null, liveError = null;
 
-      if(wantLive && liveReady()){
-        try{ r = await getLiveUsoe(vin); }
+      if(wantLive && liveReady(e)){
+        try{ r = await getLiveUsoe(e, vin); }
         catch(err){ liveError = err.message; }
       }
-      if(!r) r = await getUsoe(vin);
+      if(!r) r = await getUsoe(e, vin);
 
       return sendJson(res, 200, {
         vin,
+        env      : e.key,
         usoe     : r.usoe,
         soc      : r.soc ?? null,
+        // Both null on the cached path — the live dump is the only place
+        // charge-port and pack-current readings exist.
+        proximity: r.proximity ?? null,
+        packAmps : r.packAmps ?? null,
         readingAt: r.readingAt,      // when the vehicle actually reported it
         samples  : r.samples ?? null,
         live     : Boolean(r.live),
@@ -984,10 +1338,11 @@ const server = http.createServer(async (req, res) => {
       });
     }catch(err){
       if(err.needsAuth){
-        return sendJson(res, 401, { error: "Not signed in to Garage", needsAuth: true,
-                                    loginUrl: `http://localhost:${CONFIG.port}/auth/login` });
+        return sendJson(res, 401, { error: `Not signed in to Garage (${e.label})`, needsAuth: true,
+                                    env: e.key, envLabel: e.label,
+                                    loginUrl: `http://localhost:${CONFIG.port}/auth/login?env=${e.key}` });
       }
-      return sendJson(res, 502, { error: err.message });
+      return sendJson(res, 502, { error: err.message, env: e.key });
     }
   }
 
@@ -1000,52 +1355,54 @@ const server = http.createServer(async (req, res) => {
 
     if(!vins.length) return sendJson(res, 400, { error: "Provide a vins array" });
 
+    const e = env();
     try{
-      return sendJson(res, 200, { results: await getGeofences(vins) });
+      return sendJson(res, 200, { env: e.key, results: await getGeofences(e, vins) });
     }catch(err){
       if(err.needsAuth){
-        return sendJson(res, 401, { error: "Not signed in to Garage", needsAuth: true,
-                                    loginUrl: `http://localhost:${CONFIG.port}/auth/login` });
+        return sendJson(res, 401, { error: `Not signed in to Garage (${e.label})`, needsAuth: true,
+                                    env: e.key, envLabel: e.label,
+                                    loginUrl: `http://localhost:${CONFIG.port}/auth/login?env=${e.key}` });
       }
-      return sendJson(res, 502, { error: err.message });
+      return sendJson(res, 502, { error: err.message, env: e.key });
     }
   }
 
-  /* ── Live vitals: status / configure / test ── */
-  if(p === "/api/live" || p === "/api/live/test"){
+  /* ── Live vitals: status / configure / test ──
+     Always operates on the CURRENT environment, so the admin panel edits the
+     cookie for whichever Garage is selected and can never cross-write. */
+  if(p === "/api/live" || p === "/api/live/test" || p === "/api/live/check"){
+    const e = env();
 
     if(p === "/api/live" && req.method === "GET"){
-      return sendJson(res, 200, {
-        configured: Boolean(live.cookie),
-        enabled   : Boolean(live.enabled),
-        ready     : liveReady(),
-        lastError : live.lastError || null
-      });
+      return sendJson(res, 200, liveStatusOf(e));
     }
 
     if(p === "/api/live" && req.method === "POST"){
       const b = await readBodyOf(req);
 
       if(typeof b.cookie === "string"){
-        live.cookie    = b.cookie.trim();
-        live.lastError = null;
-        liveCache.clear();          // a new identity invalidates cached reads
+        e.live.cookie    = b.cookie.trim();
+        e.live.lastError = null;
+        e.liveCache.clear();        // a new identity invalidates cached reads
       }
-      if(typeof b.enabled === "boolean") live.enabled = b.enabled;
+      if(typeof b.enabled === "boolean") e.live.enabled = b.enabled;
 
-      if(live.enabled && !live.cookie){
-        live.enabled = false;
-        saveLive();
-        return sendJson(res, 400, { error: "Paste a session cookie before turning live read on" });
+      if(e.live.enabled && !e.live.cookie){
+        e.live.enabled = false;
+        saveGarageFile();
+        return sendJson(res, 400, { error: `Paste a session cookie for ${e.label} before turning live read on` });
       }
 
-      saveLive();
-      return sendJson(res, 200, {
-        configured: Boolean(live.cookie),
-        enabled   : live.enabled,
-        ready     : liveReady(),
-        lastError : live.lastError || null
-      });
+      saveGarageFile();
+      return sendJson(res, 200, liveStatusOf(e));
+    }
+
+    /* An immediate cookie probe, so opening the panel shows current truth
+       rather than whatever the last scheduled check found. */
+    if(p === "/api/live/check" && req.method === "POST"){
+      const ok = await checkCookie(e);
+      return sendJson(res, 200, Object.assign({ ok }, liveStatusOf(e)));
     }
 
     if(p === "/api/live/test" && req.method === "POST"){
@@ -1058,12 +1415,12 @@ const server = http.createServer(async (req, res) => {
       // Deliberately independent of the enabled flag, so a cookie can be
       // verified before switching live read on.
       try{
-        const out = await getLiveUsoe(vin);
+        const out = await getLiveUsoe(e, vin);
         return sendJson(res, 200, {
-          ok: true, vin, usoe: out.usoe, soc: out.soc, readingAt: out.readingAt
+          ok: true, vin, env: e.key, usoe: out.usoe, soc: out.soc, readingAt: out.readingAt
         });
       }catch(err){
-        return sendJson(res, 502, { error: err.message });
+        return sendJson(res, 502, { error: err.message, env: e.key });
       }
     }
 
@@ -1078,6 +1435,10 @@ const server = http.createServer(async (req, res) => {
       const u = teams.url || "";
       return sendJson(res, 200, {
         configured: alertsEnabled(),
+        // Distinct from `configured`: a webhook can be set up perfectly and
+        // still be muted, and the panel needs to say which of the two it is.
+        hasTarget : activeTransport() === "outlook" || teamsConfigured(),
+        muted     : Boolean(teams.muted),
         transport : activeTransport(),
         // Never echo the signature back to the page.
         preview: u ? u.replace(/^(https:\/\/[^/]+\/).*$/, "$1…") : "",
@@ -1087,13 +1448,29 @@ const server = http.createServer(async (req, res) => {
 
     if(p === "/api/teams" && req.method === "POST"){
       const bodyJson = await readBody();
-      const url = String(bodyJson.url || "").trim();
-      if(url && !/^https:\/\//i.test(url)){
-        return sendJson(res, 400, { error: "URL must start with https://" });
+
+      // The mute switch and the URL are set independently, so a body carrying
+      // only { muted } must not blank the webhook.
+      if(typeof bodyJson.muted === "boolean"){
+        teams.muted = bodyJson.muted;
+        saveTeams();
+        log("alerts", teams.muted ? "muted" : "unmuted");
       }
-      teams.url = url;
-      saveTeams();
-      return sendJson(res, 200, { configured: teamsConfigured() });
+
+      if(typeof bodyJson.url === "string"){
+        const url = bodyJson.url.trim();
+        if(url && !/^https:\/\//i.test(url)){
+          return sendJson(res, 400, { error: "URL must start with https://" });
+        }
+        teams.url = url;
+        saveTeams();
+      }
+
+      return sendJson(res, 200, {
+        configured: alertsEnabled(),
+        hasTarget : activeTransport() === "outlook" || teamsConfigured(),
+        muted     : Boolean(teams.muted)
+      });
     }
 
     if(p === "/api/teams/test" && req.method === "POST"){
@@ -1102,9 +1479,14 @@ const server = http.createServer(async (req, res) => {
         const text = String((await readBody()).text || "").trim().slice(0, 2000);
         const status = await deliverAlert(text ? { text } : {
           vin: "TEST0000000000000", usoe: 80.4, limit: 80.0,
-          readingAt: new Date().toISOString().slice(0, 19)
+          readingAt: new Date().toISOString().slice(0, 19),
+          envLabel: env().label
         });
-        return sendJson(res, 200, { ok: true, status, transport: activeTransport() });
+        // Deliberately ignores the mute switch: pressing Send test is an
+        // explicit request, and a test button that silently did nothing while
+        // muted would be indistinguishable from a broken webhook.
+        return sendJson(res, 200, { ok: true, status, transport: activeTransport(),
+                                    mutedOverride: Boolean(teams.muted) });
       }catch(err){
         return sendJson(res, 502, { error: err.message });
       }
@@ -1112,23 +1494,48 @@ const server = http.createServer(async (req, res) => {
 
     if(p === "/api/notify" && req.method === "POST"){
       const ev = await readBody();
+      if(teams.muted) return sendJson(res, 200, { sent: false, reason: "muted" });
       if(!alertsEnabled()) return sendJson(res, 200, { sent: false, reason: "not configured" });
-      if(ev.event !== "charge_complete") return sendJson(res, 200, { sent: false, reason: "ignored event" });
+
+      const stillLatched = ev.event === "still_latched";
+      if(ev.event !== "charge_complete" && !stillLatched){
+        return sendJson(res, 200, { sent: false, reason: "ignored event" });
+      }
 
       const vin = String(ev.vin || "").toUpperCase();
       if(!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return sendJson(res, 400, { error: "Invalid VIN" });
 
-      const last = (teams.alerted || {})[vin];
+      // Dedupe per environment: the same VIN can legitimately exist in both,
+      // and a production completion must not silence an engineering one.
+      //
+      // Latch reminders additionally key on the reminder number. That is what
+      // lets reminder #2 through while still swallowing a duplicate #2 caused
+      // by a page refresh — a plain per-VIN key would suppress every repeat
+      // after the first and the reminders would stop.
+      const e = env();
+      const base = e.key === "prod" ? vin : `${e.key}:${vin}`;
+      const key  = stillLatched
+        ? `latched:${base}:${Number(ev.reminderIndex) || 1}`
+        : base;
+
+      const last = (teams.alerted || {})[key];
       if(last && Date.now() - last < CONFIG.teamsDedupeMs){
         return sendJson(res, 200, { sent: false, reason: "duplicate suppressed" });
       }
 
       try{
-        await deliverAlert({ vin, usoe: ev.usoe, limit: ev.limit, readingAt: ev.readingAt });
+        await deliverAlert({
+          vin, usoe: ev.usoe, limit: ev.limit, readingAt: ev.readingAt,
+          envLabel: e.label,
+          stillLatched,
+          reminderIndex: Number(ev.reminderIndex) || 1,
+          minutes: Number(ev.minutes) || null
+        });
         teams.alerted = teams.alerted || {};
-        teams.alerted[vin] = Date.now();
+        teams.alerted[key] = Date.now();
         saveTeams();
-        log(`Teams alert sent via ${activeTransport()}:`, vin);
+        log(`Teams ${stillLatched ? "latch reminder" : "alert"} sent via ` +
+            `${activeTransport()} (${e.key}):`, vin);
         return sendJson(res, 200, { sent: true });
       }catch(err){
         warn("Teams alert failed:", err.message);
@@ -1139,74 +1546,101 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(405); return res.end("Method not allowed");
   }
 
-  /* ── auth status ── */
+  /* ── auth status ──
+     Reports the current environment for the banner, and every environment so
+     the admin panel can show both sign-in states at once. */
   if(p === "/api/auth/status"){
+    const e = env();
     return sendJson(res, 200, {
-      authenticated: isAuthed(),
-      garage       : CONFIG.garageUrl,
-      loginUrl     : `http://localhost:${CONFIG.port}/auth/login`
+      authenticated: isAuthed(e),
+      env          : e.key,
+      envLabel     : e.label,
+      garage       : e.garageUrl,
+      loginUrl     : `http://localhost:${CONFIG.port}/auth/login?env=${e.key}`,
+      environments : envSummary().environments
     });
   }
 
   /* ── start sign-in ── */
   if(p === "/auth/login"){
+    const e = envByKey(url.searchParams.get("env")) || env();
     try{
-      const target = await buildAuthorizeUrl();
+      const target = await buildAuthorizeUrl(e);
       res.writeHead(302, { Location: target });
       return res.end();
     }catch(err){
-      return sendHtml(res, 500, page("Sign-in failed", err.message, false));
+      return sendHtml(res, 500, page("Sign-in failed", err.message, false, e));
     }
   }
 
   /* ── OAuth redirect target ── */
   if(p === "/callback"){
     const code  = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
+    const state = url.searchParams.get("state") || "";
     const oaErr = url.searchParams.get("error");
 
+    // The environment key is the part of state before the first dot — see
+    // buildAuthorizeUrl. Fall back to the current one for a malformed state
+    // so the error page still renders in the right colours.
+    const e = envByKey(state.split(".")[0]) || env();
+
     if(oaErr) return sendHtml(res, 400, page("Sign-in declined",
-      `${oaErr}: ${url.searchParams.get("error_description") || ""}`, false));
-    if(!pending || state !== pending.state)
-      return sendHtml(res, 400, page("Sign-in failed", "State mismatch — start the sign-in again.", false));
+      `${oaErr}: ${url.searchParams.get("error_description") || ""}`, false, e));
+    if(!e.pending || state !== e.pending.state)
+      return sendHtml(res, 400, page("Sign-in failed", "State mismatch — start the sign-in again.", false, e));
 
     try{
-      await exchangeCode(code);
-      log("signed in to Garage");
-      return sendHtml(res, 200, page("Signed in",
-        "You're connected to Garage. This tab can be closed — the dashboard is live.", true));
+      await exchangeCode(e, code);
+      e.pending = null;
+      log(`signed in to Garage (${e.key})`);
+      return sendHtml(res, 200, page(`Signed in to ${e.label}`,
+        "You're connected to Garage. This tab can be closed — the dashboard is live.", true, e));
     }catch(err){
-      return sendHtml(res, 500, page("Sign-in failed", err.message, false));
+      return sendHtml(res, 500, page("Sign-in failed", err.message, false, e));
     }
   }
 
   /* ── sign out ── */
   if(p === "/auth/logout"){
-    tokens = null; mcpSession = null; cache.clear();
-    try { fs.unlinkSync(CONFIG.tokenFile); } catch {}
-    return sendJson(res, 200, { ok: true });
+    const e = envByKey(url.searchParams.get("env")) || env();
+    e.tokens = null;
+    e.mcpSession = null;
+    e.cache.clear();
+    e.geoCache.clear();
+    e.liveCache.clear();
+    try { fs.unlinkSync(e.def.tokenFile); } catch {}
+    log(`signed out of Garage (${e.key})`);
+    return sendJson(res, 200, { ok: true, env: e.key });
   }
 
   if(req.method !== "GET"){ res.writeHead(405); return res.end("Method not allowed"); }
   return serveStatic(req, res, p);
 });
 
-/* Minimal styled page for the OAuth round-trip. */
-function page(title, msg, ok){
+/* Minimal styled page for the OAuth round-trip. The accent follows the
+   environment, matching the dashboard: red for production, yellow for
+   engineering — so a sign-in tab is never ambiguous about which Garage it
+   just authorised. */
+function page(title, msg, ok, e){
+  const accent = ok ? "#12BB6A" : (e && e.key === "eng" ? "#FFC61E" : "#E82127");
+  const tag = e && e.key !== "prod"
+    ? `<div class="tag">${e.label}</div>` : "";
   return `<!doctype html><meta charset="utf-8"><title>${title}</title>
 <style>
  body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
   font:14px/1.6 Inter,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
   background:#171A20;color:#fff;text-align:center}
  .c{max-width:420px;padding:32px}
- .d{width:44px;height:44px;border-radius:50%;margin:0 auto 20px;
-    background:${ok ? "#12BB6A" : "#E82127"}}
+ .d{width:44px;height:44px;border-radius:50%;margin:0 auto 20px;background:${accent}}
+ .tag{display:inline-block;margin:0 0 12px;padding:3px 10px;border-radius:11px;
+   background:#FFC61E;color:#171A20;font-size:10px;font-weight:700;
+   letter-spacing:.12em;text-transform:uppercase}
  h1{font-size:20px;font-weight:600;margin:0 0 8px;letter-spacing:-.01em}
  p{color:rgba(255,255,255,.66);margin:0 0 22px}
  a{display:inline-block;padding:11px 26px;border-radius:4px;background:#fff;color:#171A20;
    text-decoration:none;font-weight:600;font-size:12px;letter-spacing:.12em;text-transform:uppercase}
 </style>
-<div class="c"><div class="d"></div><h1>${title}</h1><p>${msg}</p>
+<div class="c"><div class="d"></div>${tag}<h1>${title}</h1><p>${msg}</p>
 <a href="http://localhost:${CONFIG.port}/">Open dashboard</a></div>`;
 }
 
@@ -1221,25 +1655,36 @@ function openBrowser(target){
 
 server.listen(CONFIG.port, "127.0.0.1", async () => {
   const home = `http://localhost:${CONFIG.port}/`;
+  const e = env();
+
   console.log("");
   log("Charging Tracker");
   log("dashboard :", home);
-  log("garage    :", CONFIG.garageUrl);
+  log("environment:", `${e.label} — ${e.garageUrl}` + (ENV_FORCED ? "  (pinned by GARAGE_ENV)" : ""));
+
+  for(const other of Object.values(ENVS)){
+    log(`  ${other.key === currentEnvKey ? "▸" : " "} ${other.label.padEnd(11)}`,
+        `${isAuthed(other) ? "signed in " : "signed out"}  ·  live read ` +
+        (liveReady(other) ? "on" : other.live.cookie ? "off (cookie saved)" : "off (no cookie)"));
+  }
+
   log("reading   : USOE (usable state of energy)");
-  log("live read :", liveReady() ? "on (session cookie)"
-    : live.cookie ? "off (cookie saved)" : "off (no cookie)");
-  log("alerts    :", activeTransport() === "outlook"
-    ? `outlook → ${CONFIG.alertEmailTo || "your own mailbox"} (subject ${CONFIG.alertSubjectTag})`
-    : teamsConfigured() ? "teams webhook" : "off");
+  log("alerts    :", teams.muted ? "MUTED (target still configured)"
+    : activeTransport() === "outlook"
+      ? `outlook → ${CONFIG.alertEmailTo || "your own mailbox"} (subject ${CONFIG.alertSubjectTag})`
+      : teamsConfigured() ? "teams webhook" : "off");
+  log("cookie chk:", `every ${Math.round(CONFIG.cookieCheckMs / 60000)} min`);
   console.log("");
 
-  if(isAuthed()){
-    log("existing Garage token found — starting live");
+  startCookieWatch();
+
+  if(isAuthed(e)){
+    log(`existing ${e.label} token found — starting live`);
     openBrowser(home);
   }else{
-    log("no Garage token — opening Bouncer sign-in");
+    log(`no ${e.label} token — opening Bouncer sign-in`);
     log("(you must be on the Tesla network / VPN)");
-    openBrowser(`${home}auth/login`);
+    openBrowser(`${home}auth/login?env=${e.key}`);
   }
 });
 

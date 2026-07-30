@@ -1,0 +1,3827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Charging Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ───────────────────────────── Design tokens ─────────────────────────────
+   Palette lifted from Tesla.com: near-black #171A20, Tesla red #E82127,
+   the flat #F4F4F4 section grey, and generous white space.               */
+:root{
+  --ink:#171A20;
+  --ink-soft:#393C41;
+  --ink-mute:#5C5E62;
+  --line:#D0D1D2;
+  --line-soft:#E8E8E9;
+  --paper:#FFFFFF;
+  --paper-alt:#F4F4F4;
+  --blue:#3E6AE1;
+
+  --grey-car:#9AA0A6;
+  --amber:#F5B31B;
+  --amber-lit:#FFDC72;
+  --green:#12BB6A;
+
+  /* ── Accent ────────────────────────────────────────────────────────────
+     Everything that was flat "Tesla red" now goes through this set, because
+     engineering Garage is yellow and a single --red swap does not survive
+     contact with contrast: yellow behind white text is unreadable, and
+     yellow AS text on white is worse.
+
+     So the accent is four roles rather than one colour:
+       --red        a fill, with --red-on as the only text colour safe on it
+       --red-ink    the same accent when it must BE the text, on paper
+       --red-tint   the pale wash behind an accent-coloured message
+       --red-line   a border that reads as accent without shouting
+
+     Production keeps ink/tint identical to the fill, which is why the
+     original flat usage looked fine and why the split is invisible here. */
+  --red:#E82127;
+  --red-ink:#E82127;
+  --red-on:#FFFFFF;
+  --red-tint:#FDE7E8;
+  --red-line:rgba(232,33,39,.40);
+  --red-deep:#A3161B;      /* error text that must survive on --red-tint */
+  --red-dark:#FDF2F2;      /* faintest wash, for a bad input field        */
+  --entry-err:#FF8A8E;     /* accent as text on the dark hero             */
+}
+
+/* Engineering. Garage's dev instance is yellow-accented, so the dashboard
+   follows it — every red attribute becomes yellow, and the vehicle graphic
+   becomes a Cybercab. Scoped to a body class so the whole switch is one
+   class toggle and nothing has to be re-rendered to re-theme. */
+body.env-eng{
+  --red:#FFC61E;
+  --red-ink:#8A6200;
+  --red-on:#171A20;
+  --red-tint:#FFF6DC;
+  --red-line:rgba(212,160,7,.55);
+  --red-deep:#8A6200;
+  --red-dark:#FFFBEF;
+  --entry-err:#FFD866;
+}
+
+:root{
+  --r-sm:4px;
+  --r-md:8px;
+  --r-lg:18px;
+  --shadow:0 2px 10px rgba(0,0,0,.08);
+  --shadow-lg:0 8px 40px rgba(0,0,0,.16);
+  --nav-h:56px;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  color:var(--ink);
+  background:var(--paper);
+  -webkit-font-smoothing:antialiased;
+  font-size:14px;
+  line-height:1.5;
+}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select{font-family:inherit;font-size:14px;color:inherit}
+
+/* ───────────────────────────── Nav ───────────────────────────── */
+.nav{
+  position:sticky;top:0;z-index:60;
+  height:var(--nav-h);
+  display:flex;align-items:center;gap:18px;
+  padding:0 22px;
+  background:var(--paper);
+  border-bottom:1px solid var(--line-soft);
+}
+.wordmark{
+  font-weight:600;font-size:16px;letter-spacing:.42em;
+  color:var(--ink);text-indent:.42em;user-select:none;
+}
+.nav-div{width:1px;height:18px;background:var(--line)}
+.nav-title{font-weight:500;font-size:14px;color:var(--ink-soft)}
+.nav-spacer{flex:1}
+
+/* Environment chip. Hidden in production — the absence of a badge IS the
+   production signal, so nothing is added to the ordinary case. In
+   engineering it is impossible to miss, which is the entire point: a
+   dashboard pointed at dev must never be mistaken for the real fleet. */
+.env-chip{
+  display:none;align-items:center;gap:6px;
+  height:22px;padding:0 10px;border-radius:11px;
+  background:var(--red);color:var(--red-on);
+  font-size:10px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;
+}
+body.env-eng .env-chip{display:inline-flex}
+/* A hairline of accent along the whole top edge, so the environment reads
+   even when the nav is scrolled past on a small screen. */
+body.env-eng .nav{box-shadow:inset 0 3px 0 var(--red)}
+
+.nav-btn{
+  display:flex;align-items:center;gap:7px;
+  height:32px;padding:0 13px;border-radius:var(--r-sm);
+  font-size:12px;font-weight:500;color:var(--ink);
+  transition:background .15s;
+}
+.nav-btn:hover{background:rgba(23,26,32,.07)}
+.nav-btn svg{width:17px;height:17px;display:block}
+
+.bell-wrap{position:relative}
+.bell-badge{
+  position:absolute;top:-1px;right:-1px;
+  min-width:16px;height:16px;padding:0 4px;
+  border-radius:8px;background:var(--red);
+  color:var(--red-on);font-size:10px;font-weight:700;line-height:16px;text-align:center;
+  border:2px solid var(--paper);
+}
+.bell-badge[hidden]{display:none}
+
+/* ───────────────────────────── Hero ───────────────────────────── */
+.hero{
+  position:relative;overflow:hidden;
+  background:var(--ink);
+  color:#fff;
+  padding:54px 22px 62px;
+  text-align:center;
+}
+/* 2D backdrop: abstract stall bays + charge arcs, no photography. */
+.hero-art{position:absolute;inset:0;width:100%;height:100%;opacity:.5;pointer-events:none}
+.hero-inner{position:relative;max-width:840px;margin:0 auto}
+.hero h1{
+  margin:0 0 8px;font-size:38px;font-weight:600;letter-spacing:-.02em;
+}
+.hero p{margin:0 auto 30px;max-width:520px;font-size:14px;color:rgba(255,255,255,.68)}
+
+/* VIN entry bar */
+.entry{
+  display:flex;gap:8px;max-width:620px;margin:0 auto;
+  background:var(--paper);padding:8px;border-radius:var(--r-md);
+  box-shadow:var(--shadow-lg);
+}
+.entry input{
+  flex:1;height:42px;padding:0 14px;border:none;outline:none;
+  background:transparent;letter-spacing:.06em;text-transform:uppercase;
+  font-weight:500;
+  /* Explicit, NOT inherited. The global `input{color:inherit}` rule pulls
+     from .hero, which is white text on the near-black hero — but this input
+     sits in a white .entry box, so inheriting gave white-on-white and the
+     VIN was invisible while being typed. Only the placeholder had its own
+     colour, which is why the hint showed and the typing didn't. */
+  color:var(--ink);
+}
+.entry input::placeholder{letter-spacing:.02em;text-transform:none;color:#9A9C9E;font-weight:400}
+.btn-primary{
+  height:42px;padding:0 32px;border-radius:var(--r-sm);
+  background:var(--ink);color:#fff;
+  font-size:12px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;
+  transition:background .15s;
+}
+.btn-primary:hover{background:#000}
+.btn-primary:disabled{opacity:.4;cursor:not-allowed}
+
+.entry-msg{
+  min-height:20px;margin:11px auto 0;max-width:620px;
+  font-size:12.5px;color:var(--entry-err);text-align:left;padding-left:2px;
+}
+.entry-msg.ok{color:#7FE3AE}
+
+/* ───────────────────────────── Stat strip ───────────────────────────── */
+.strip{
+  display:flex;flex-wrap:wrap;
+  border-bottom:1px solid var(--line-soft);
+  background:var(--paper);
+}
+.stat{
+  flex:1;min-width:130px;padding:16px 22px;
+  border-right:1px solid var(--line-soft);
+}
+.stat:last-child{border-right:none}
+
+/* Clickable cells act as list filters. Only the counting cells carry
+   data-filter — "Charge limit" and "Next refresh" stay inert. */
+.stat[data-filter]{position:relative;cursor:pointer;transition:background .15s}
+.stat[data-filter]:hover{background:var(--paper-alt)}
+.stat[data-filter]:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.stat.on{background:var(--paper-alt)}
+.stat.on .stat-k{color:var(--ink)}
+.stat.on::after{
+  content:"";position:absolute;left:0;right:0;bottom:0;height:2px;
+  background:var(--ink);
+}
+
+.filter-empty{
+  padding:40px 20px;text-align:center;
+  border:1px dashed var(--line);border-radius:var(--r-lg);
+  background:var(--paper-alt);
+  font-size:13px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.stat-k{
+  font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-mute);margin-bottom:3px;
+}
+.stat-v{font-size:22px;font-weight:600;letter-spacing:-.01em}
+.stat-v small{font-size:13px;font-weight:500;color:var(--ink-mute)}
+
+/* ───────────────────────────── Sign-in banner ───────────────────────────── */
+.banner{
+  display:flex;align-items:center;gap:13px;
+  max-width:1180px;margin:22px auto -6px;padding:14px 18px;
+  background:#FFF8E6;border:1px solid #F0D9A0;border-radius:var(--r-md);
+}
+.banner[hidden]{display:none}
+.banner>svg{width:19px;height:19px;flex:none;color:#8A6200}
+.banner-t{flex:1;font-size:13px;color:#6B4E00;line-height:1.45}
+.banner-t b{font-weight:600}
+.banner-btn{
+  flex:none;height:34px;padding:0 20px;border-radius:var(--r-sm);
+  background:var(--ink);color:#fff;text-decoration:none;
+  display:flex;align-items:center;
+  font-size:11.5px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+}
+.banner-btn:hover{background:#000}
+
+/* ───────────────────────────── List ───────────────────────────── */
+.wrap{max-width:1180px;margin:0 auto;padding:28px 22px 80px}
+.list-head{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:14px;
+}
+.list-head h2{
+  margin:0;font-size:13px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.btn-ghost{
+  height:32px;padding:0 15px;border:1px solid var(--line);border-radius:var(--r-sm);
+  font-size:11.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  background:var(--paper);transition:border-color .15s,background .15s;
+}
+.btn-ghost:hover{border-color:var(--ink);background:var(--paper-alt)}
+.btn-ghost:disabled{opacity:.4;cursor:not-allowed}
+
+.list{display:flex;flex-direction:column;gap:12px}
+
+/* Sweep progress. A 2px rule under the nav that fills as the sweep advances —
+   the stat cell already counts 3/12, but a number changing every few hundred
+   ms is exactly the thing that read as stuttery. */
+.sweep{
+  position:sticky;top:var(--nav-h);z-index:55;
+  height:2px;background:var(--line-soft);
+  opacity:0;transition:opacity .3s;pointer-events:none;
+}
+.sweep.on{opacity:1}
+.sweep-fill{
+  height:100%;width:0;background:var(--ink);
+  transition:width .35s cubic-bezier(.3,.9,.3,1);
+}
+
+/* Rows are reordered by moving existing nodes, then animated from their old
+   position to the new one (FLIP). The transition is applied inline only for
+   the duration of the move, so it never fights the enter/exit keyframes. */
+.veh.moving{will-change:transform}
+
+/* Row */
+.veh{
+  display:grid;
+  grid-template-columns:196px 1fr 168px 44px;
+  align-items:center;gap:20px;
+  padding:14px 18px 14px 8px;
+  background:var(--paper);
+  border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+  transition:border-color .2s,box-shadow .2s;
+  animation:rowIn .34s cubic-bezier(.2,.8,.3,1);
+}
+@keyframes rowIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+.veh.leaving{animation:rowOut .42s ease forwards}
+@keyframes rowOut{to{opacity:0;transform:translateX(26px) scale(.97)}}
+.veh:hover{box-shadow:var(--shadow)}
+.veh.charging{border-color:rgba(245,179,27,.55)}
+.veh.complete{border-color:rgba(18,187,106,.5)}
+
+.scene{width:190px;height:145px;display:block}   /* matches the 170×130 viewBox */
+
+.veh-id{min-width:0}
+.vin{
+  font-size:15px;font-weight:600;letter-spacing:.055em;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.veh-sub{
+  margin-top:3px;font-size:11.5px;color:var(--ink-mute);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.badge{
+  display:inline-flex;align-items:center;gap:5px;
+  height:20px;padding:0 9px;border-radius:10px;
+  font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.veh.pending  .badge{background:#EEEFF0;color:#5C5E62}
+.veh.stalled  .badge{background:#EEEFF0;color:#5C5E62}
+.veh.charging .badge{background:#FFF4D6;color:#8A6200}
+.veh.charging .dot{animation:blink 1.5s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+.veh.complete .badge{background:#DFF6EA;color:#0A7A45}
+.veh.error    .badge{background:var(--red-tint);color:var(--red-deep)}
+
+/* Geofence tag — same pill as the status badge, light purple. Its colour is
+   set on .badge.geo directly so the per-status rules above can't override it. */
+.veh .badge.geo{background:#F1ECFC;color:#5B3DB1}
+
+/* Charged but still latched to the Supercharger. Solid accent rather than the
+   pale tint every other badge uses: this is the one that wants someone to get
+   up and go unplug a car, and a tinted version would sit almost invisibly next
+   to the green "complete" pill it always appears beside. In engineering a pale
+   yellow would also be near-identical to the amber charging badge, whereas
+   solid is unmistakable in both themes.
+   Placed after the per-status rules so it wins the specificity tie. */
+.veh .badge.latched{background:var(--red);color:var(--red-on)}
+.veh .badge.latched .dot{animation:blink 1.5s ease-in-out infinite}
+/* Still latched as far as we know, but proximity has gone unreadable and the
+   reminders have paused — shown, but no longer asserted. */
+.veh .badge.latched.stale{opacity:.5}
+.veh .badge.latched.stale .dot{animation:none}
+
+/* Accent-driven SVG. Driven by class rather than by writing var(--red) into
+   a fill="" presentation attribute — attributes are the lowest-priority way
+   to set an SVG paint and custom-property support in them has been uneven,
+   whereas a stylesheet rule is unambiguous. It also means the environment
+   switch re-themes every graphic without redrawing any of them. */
+.accent-fill{fill:var(--red)}
+.accent-stop{stop-color:var(--red)}
+.sc-cap{fill:var(--red)}
+.sc-t{stroke:var(--red-on)}
+
+/* A stalled vehicle keeps its Supercharger drawn but desaturated. Done with
+   a filter rather than by swapping every fill, so the post, the red header
+   and the connector LED all grey out together. The opacity here overrides
+   the presentation attribute on the group, which is what fades it back in. */
+.sc-dim{filter:grayscale(1);opacity:.5;transition:opacity .45s,filter .45s}
+
+/* Readout */
+.readout{text-align:right}
+.usoe{
+  font-size:29px;font-weight:600;letter-spacing:-.025em;
+  font-variant-numeric:tabular-nums;line-height:1.05;
+}
+.usoe small{font-size:15px;font-weight:500;color:var(--ink-mute);margin-left:1px}
+.usoe.dim{color:#B4B6B8}
+.delta{
+  font-size:11px;font-weight:600;color:var(--green);
+  font-variant-numeric:tabular-nums;height:15px;
+}
+.delta[hidden]{visibility:hidden;display:block}
+
+.bar{
+  position:relative;height:4px;margin-top:8px;
+  background:var(--line-soft);border-radius:2px;overflow:hidden;
+}
+.bar-fill{
+  position:absolute;inset:0 auto 0 0;border-radius:2px;
+  transition:width .7s cubic-bezier(.3,.9,.3,1),background .3s;
+  background:var(--grey-car);
+}
+.veh.charging .bar-fill{background:var(--amber)}
+.veh.complete .bar-fill{background:var(--green)}
+.bar-limit{
+  position:absolute;top:-2px;width:2px;height:8px;
+  background:var(--ink);border-radius:1px;opacity:.42;
+}
+.readout-foot{
+  margin-top:6px;font-size:10.5px;color:var(--ink-mute);
+  font-variant-numeric:tabular-nums;
+}
+
+.btn-x{
+  width:30px;height:30px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  color:#9A9C9E;transition:background .15s,color .15s;justify-self:end;
+}
+.btn-x:hover{background:var(--red-tint);color:var(--red-ink)}
+.btn-x svg{width:15px;height:15px}
+
+/* Collapsible "fully charged" bundle */
+.done-group{
+  border:1px solid var(--line-soft);border-radius:var(--r-lg);
+  background:var(--paper);overflow:hidden;
+}
+.done-head{
+  width:100%;display:flex;align-items:center;gap:10px;
+  padding:13px 18px;background:var(--paper-alt);
+  transition:background .15s;text-align:left;
+}
+.done-head:hover{background:#EAEBEC}
+.done-chev{width:15px;height:15px;flex:none;color:var(--ink-mute);transition:transform .2s}
+.done-group.open .done-chev{transform:rotate(90deg)}
+.done-title{
+  font-size:12px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);
+}
+.done-count{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:20px;height:20px;padding:0 7px;border-radius:10px;
+  background:#DFF6EA;color:#0A7A45;font-size:11px;font-weight:700;
+}
+.done-spacer{flex:1}
+.done-clear{
+  font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-mute);padding:5px 10px;border-radius:var(--r-sm);transition:.15s;
+}
+.done-clear:hover{background:var(--red-tint);color:var(--red-ink)}
+.done-body{display:flex;flex-direction:column;gap:12px;padding:12px}
+.done-group:not(.open) .done-body{display:none}
+
+/* Admin toggle row */
+.switch{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+.switch input{width:17px;height:17px;accent-color:var(--ink);cursor:pointer;margin:0}
+.switch span{font-size:13.5px;color:var(--ink)}
+
+/* Empty state */
+.empty{
+  padding:66px 20px;text-align:center;
+  border:1px dashed var(--line);border-radius:var(--r-lg);
+  background:var(--paper-alt);
+}
+.empty svg{width:150px;height:78px;opacity:.42;margin-bottom:14px}
+.empty h3{margin:0 0 5px;font-size:15px;font-weight:600}
+.empty p{margin:0;font-size:13px;color:var(--ink-mute)}
+
+/* Page scroll is frozen while any overlay is up, so a scroll gesture aimed at
+   a modal pane can't run away with the page behind it. The padding is written
+   by syncScrollLock() and equals the width of the scrollbar being hidden —
+   without it the whole layout jumps sideways as the bar disappears. */
+body.no-scroll{overflow:hidden}
+
+/* ───────────────────────────── Notifications ───────────────────────────── */
+.scrim{
+  position:fixed;inset:0;z-index:80;
+  background:rgba(23,26,32,.42);
+  opacity:0;pointer-events:none;transition:opacity .22s;
+}
+.scrim.on{opacity:1;pointer-events:auto}
+
+.panel{
+  position:fixed;top:0;right:0;bottom:0;z-index:90;
+  width:392px;max-width:92vw;
+  background:var(--paper);
+  box-shadow:var(--shadow-lg);
+  transform:translateX(101%);transition:transform .28s cubic-bezier(.3,.9,.3,1);
+  display:flex;flex-direction:column;
+}
+.panel.on{transform:none}
+.panel-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 20px;border-bottom:1px solid var(--line-soft);flex:none;
+}
+.panel-head h3{margin:0;font-size:13px;font-weight:600;letter-spacing:.11em;text-transform:uppercase}
+.panel-body{flex:1;overflow-y:auto}
+
+.note{
+  display:flex;gap:12px;padding:14px 20px;
+  border-bottom:1px solid var(--line-soft);
+}
+.note.unread{background:#F6F9FF}
+.note-ic{
+  flex:none;width:28px;height:28px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+}
+.note-ic svg{width:14px;height:14px}
+.note-ic.success{background:#DFF6EA;color:#0A7A45}
+.note-ic.info{background:#EEEFF0;color:#5C5E62}
+.note-ic.charge{background:#FFF4D6;color:#8A6200}
+.note-ic.error{background:var(--red-tint);color:var(--red-deep)}
+.note-txt{min-width:0;flex:1}
+.note-msg{font-size:13px;line-height:1.42}
+.note-msg b{font-weight:600;letter-spacing:.04em}
+.note-ts{margin-top:3px;font-size:11px;color:var(--ink-mute);font-variant-numeric:tabular-nums}
+.note-empty{padding:56px 20px;text-align:center;color:var(--ink-mute);font-size:13px}
+
+/* ───────────────────────────── Admin modal ─────────────────────────────
+   Two shapes in one dialog. Locked, it is a narrow code prompt. Unlocked, it
+   widens into a rail of sections beside a scrolling pane — the settings grew
+   past the point where one long scroll was findable.                       */
+.modal{
+  position:fixed;z-index:100;top:50%;left:50%;
+  transform:translate(-50%,-46%) scale(.97);
+  width:452px;max-width:93vw;max-height:88vh;
+  background:var(--paper);border-radius:var(--r-lg);
+  box-shadow:var(--shadow-lg);
+  opacity:0;pointer-events:none;
+  transition:opacity .2s,transform .2s,width .24s cubic-bezier(.3,.9,.3,1);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.modal.on{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1)}
+/* Unlocked it becomes a workspace rather than a dialog, so it takes real
+   estate: a fixed tall frame instead of a content-sized box, which also
+   stops the pane resizing as you move between sections. */
+.modal.unlocked{
+  width:1040px;
+  height:min(86vh, 780px);
+  max-height:92vh;
+}
+.modal-head{
+  display:flex;align-items:center;gap:11px;
+  padding:20px 24px;border-bottom:1px solid var(--line-soft);flex:none;
+}
+.modal-head h3{margin:0;font-size:13px;font-weight:600;letter-spacing:.11em;text-transform:uppercase}
+.modal-head .sp{flex:1}
+.modal-body{padding:22px 24px 24px;overflow-y:auto}
+
+/* Section rail + pane */
+.admin{display:grid;grid-template-columns:218px 1fr;min-height:0;flex:1}
+.admin[hidden]{display:none}
+
+/* min-height:0 on both tracks: a grid item defaults to min-height:auto, which
+   makes it refuse to shrink below its content and pushes the scrollbar onto
+   the page instead of into the pane. */
+.admin-rail{
+  display:flex;flex-direction:column;
+  border-right:1px solid var(--line-soft);
+  background:var(--paper-alt);
+  padding:10px 0;overflow-y:auto;min-height:0;
+}
+.rail-item{
+  position:relative;display:flex;align-items:center;gap:10px;
+  width:100%;padding:10px 16px;text-align:left;
+  font-size:12.5px;font-weight:500;color:var(--ink-soft);
+  transition:background .15s,color .15s;
+}
+.rail-item svg{width:16px;height:16px;flex:none;opacity:.62}
+.rail-item:hover{background:rgba(23,26,32,.05);color:var(--ink)}
+.rail-item.on{background:var(--paper);color:var(--ink);font-weight:600}
+.rail-item.on svg{opacity:1}
+.rail-item.on::before{
+  content:"";position:absolute;left:0;top:6px;bottom:6px;width:2px;background:var(--ink);
+}
+/* A section carrying something the operator should notice — an environment
+   that isn't signed in, a cookie that just expired. */
+.rail-item .warn{
+  width:6px;height:6px;border-radius:50%;background:var(--red);
+  margin-left:auto;flex:none;
+}
+.rail-item .warn[hidden]{display:none}
+/* Green means that section is doing something right now, red means it wants
+   attention. Same slot, so a section only ever shows one. */
+.rail-item .warn.ok{background:var(--green);animation:livePulse 2s ease-in-out infinite}
+
+@keyframes livePulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(18,187,106,.5)}
+  70%    {box-shadow:0 0 0 5px rgba(18,187,106,0)}
+}
+
+/* Live activity indicator, shown at the top of the Live vitals section. */
+.live-state{
+  display:inline-flex;align-items:center;gap:8px;
+  height:28px;padding:0 12px;margin-bottom:16px;border-radius:14px;
+  background:var(--paper-alt);border:1px solid var(--line-soft);
+  font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.live-state .bulb{
+  width:8px;height:8px;border-radius:50%;background:#B4B6B8;flex:none;
+}
+.live-state.on{background:#EAF9F1;border-color:#B9E9CF;color:#0A7A45}
+.live-state.on .bulb{background:var(--green);animation:livePulse 2s ease-in-out infinite}
+.live-state.bad{background:var(--red-tint);border-color:var(--red-line);color:var(--red-deep)}
+.live-state.bad .bulb{background:var(--red)}
+.live-state .sub{
+  font-weight:500;letter-spacing:0;text-transform:none;opacity:.8;
+}
+.rail-foot{
+  margin-top:auto;padding:14px 16px 4px;
+  font-size:10.5px;line-height:1.5;color:var(--ink-mute);
+}
+
+.admin-pane{overflow-y:auto;padding:26px 32px 30px;min-width:0;min-height:0}
+/* Long-form hints stay readable rather than stretching across the full
+   width now that the pane is much wider. */
+.admin-pane .sec{max-width:620px}
+.sec{display:none}
+.sec.on{display:block;animation:secIn .2s ease}
+@keyframes secIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.sec-h{margin:0 0 4px;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.sec-p{margin:0 0 18px;font-size:12.5px;color:var(--ink-mute);line-height:1.5}
+
+/* Environment picker */
+.seg{display:flex;border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden}
+.seg button{
+  flex:1;height:44px;background:var(--paper);color:var(--ink-mute);
+  font-size:12px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+  transition:background .15s,color .15s;
+}
+.seg button + button{border-left:1px solid var(--line)}
+.seg button:hover{background:var(--paper-alt);color:var(--ink)}
+.seg button.on{background:var(--ink);color:#fff}
+/* Engineering selects in its own colour, so the control itself shows which
+   world you are in before you read the label. */
+.seg button.on[data-env="eng"]{background:var(--red);color:var(--red-on)}
+.seg button:disabled{opacity:.45;cursor:not-allowed}
+
+.env-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:12px 13px;margin-top:10px;
+  border:1px solid var(--line-soft);border-radius:var(--r-md);
+  font-size:12.5px;
+}
+.env-row.cur{border-color:var(--line);background:var(--paper-alt)}
+.env-row .name{font-weight:600}
+.env-row .host{
+  color:var(--ink-mute);font-size:11px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;
+}
+.env-row .sp{flex:1}
+.pill{
+  display:inline-flex;align-items:center;height:20px;padding:0 9px;border-radius:10px;
+  font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;flex:none;
+}
+.pill.ok{background:#DFF6EA;color:#0A7A45}
+.pill.no{background:var(--red-tint);color:var(--red-deep)}
+.pill.dim{background:#EEEFF0;color:#5C5E62}
+.mini{
+  height:26px;padding:0 12px;border:1px solid var(--line);border-radius:var(--r-sm);
+  font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  background:var(--paper);color:var(--ink);text-decoration:none;
+  display:inline-flex;align-items:center;flex:none;transition:.15s;
+}
+.mini:hover{border-color:var(--ink);background:var(--paper-alt)}
+
+@media (max-width:1100px){
+  .modal.unlocked{width:93vw}
+}
+@media (max-width:800px){
+  .modal.unlocked{width:452px;height:auto;max-height:88vh}
+  .admin{grid-template-columns:1fr}
+  .admin-rail{
+    flex-direction:row;overflow-x:auto;overflow-y:hidden;padding:0;
+    border-right:none;border-bottom:1px solid var(--line-soft);
+  }
+  .rail-item{width:auto;white-space:nowrap;padding:13px 14px}
+  .rail-item svg,.rail-foot{display:none}
+  .rail-item.on::before{left:0;right:0;top:auto;bottom:0;width:auto;height:2px}
+  .rail-item .warn{margin-left:6px}
+}
+
+/* ───────────────────────────── Confirm dialog ─────────────────────────────
+   Used wherever an action reaches outside the page — a manual sweep that
+   pulls real data from Garage, wiping the list, changing environment. Its
+   own scrim sits above the admin modal so it can be raised from inside it. */
+.scrim.top{z-index:110;background:rgba(23,26,32,.34)}
+
+.confirm{
+  position:fixed;z-index:120;top:50%;left:50%;
+  transform:translate(-50%,-46%) scale(.97);
+  width:418px;max-width:92vw;
+  padding:26px 26px 22px;
+  background:var(--paper);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
+  opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;
+}
+.confirm.on{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1)}
+.confirm-ic{
+  width:46px;height:46px;border-radius:50%;margin:0 auto 14px;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--red-tint);color:var(--red-ink);
+}
+.confirm-ic svg{width:21px;height:21px}
+.confirm h3{margin:0 0 7px;text-align:center;font-size:16px;font-weight:600;letter-spacing:-.01em}
+.confirm-t{margin:0;text-align:center;font-size:13px;color:var(--ink-mute);line-height:1.55}
+.confirm-facts{
+  margin:16px 0 0;border:1px solid var(--line-soft);border-radius:var(--r-md);overflow:hidden;
+}
+.confirm-facts[hidden]{display:none}
+.confirm-facts .cf{display:flex;justify-content:space-between;gap:12px;padding:9px 13px;font-size:12.5px}
+.confirm-facts .cf + .cf{border-top:1px solid var(--line-soft)}
+.confirm-facts .cf span:first-child{color:var(--ink-mute)}
+.confirm-facts .cf span:last-child{font-weight:600;font-variant-numeric:tabular-nums}
+.confirm-btns{display:flex;gap:9px;margin-top:17px}
+.confirm-btns .btn-block{margin-bottom:0}
+
+.lock-ic{
+  width:46px;height:46px;margin:6px auto 14px;border-radius:50%;
+  background:var(--paper-alt);display:flex;align-items:center;justify-content:center;
+}
+.lock-ic svg{width:21px;height:21px;color:var(--ink-soft)}
+.gate-t{text-align:center;font-size:13px;color:var(--ink-mute);margin-bottom:18px}
+
+/* Six-digit code entry, styled like a 2FA prompt. */
+.otp{display:flex;gap:9px;justify-content:center;margin-bottom:2px}
+.otp-box{
+  width:46px;height:56px;padding:0;
+  border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--paper);
+  text-align:center;font-size:22px;font-weight:600;
+  font-variant-numeric:tabular-nums;
+  outline:none;transition:border-color .15s,box-shadow .15s,background .15s;
+  -webkit-text-security:disc;
+}
+.otp-box::-webkit-outer-spin-button,.otp-box::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.otp-box:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(23,26,32,.10)}
+.otp-box.filled{background:var(--paper-alt);border-color:#A9ABAD}
+.otp.bad .otp-box{border-color:var(--red-ink);background:var(--red-dark)}
+.otp.bad{animation:otpShake .38s cubic-bezier(.36,.07,.19,.97)}
+@keyframes otpShake{
+  10%,90%{transform:translateX(-2px)} 20%,80%{transform:translateX(4px)}
+  30%,50%,70%{transform:translateX(-7px)} 40%,60%{transform:translateX(7px)}
+}
+@media (max-width:420px){ .otp{gap:6px} .otp-box{width:40px;height:50px;font-size:19px} }
+
+.field{margin-bottom:18px}
+.field:last-child{margin-bottom:0}
+.field label{
+  display:block;margin-bottom:6px;
+  font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.field .hint{margin-top:6px;font-size:11.5px;color:var(--ink-mute);line-height:1.45}
+.inp{
+  width:100%;height:42px;padding:0 13px;
+  border:1px solid var(--line);border-radius:var(--r-sm);
+  background:var(--paper);outline:none;transition:border-color .15s;
+}
+.inp:focus{border-color:var(--ink)}
+.row2{display:flex;gap:10px}
+.row2>*{flex:1}
+
+.chips{display:flex;gap:7px;margin-top:9px;flex-wrap:wrap}
+.chip{
+  height:28px;padding:0 12px;border:1px solid var(--line);border-radius:14px;
+  font-size:11.5px;font-weight:600;transition:.15s;
+}
+.chip:hover{border-color:var(--ink)}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+.sep{height:1px;background:var(--line-soft);margin:20px 0}
+.danger-h{
+  font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-mute);margin-bottom:10px;
+}
+.btn-block{
+  width:100%;height:42px;border-radius:var(--r-sm);
+  font-size:12px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+  border:1px solid var(--line);background:var(--paper);
+  transition:.15s;margin-bottom:9px;
+}
+.btn-block:hover{border-color:var(--ink);background:var(--paper-alt)}
+.btn-block.red{color:var(--red-ink);border-color:var(--red-line)}
+.btn-block.red:hover{background:var(--red-tint);border-color:var(--red-ink)}
+.btn-block.solid{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn-block.solid:hover{background:#000}
+
+.gate-err{
+  margin-top:10px;font-size:12.5px;color:var(--red-ink);text-align:center;
+  height:17px;
+}
+.saved{
+  font-size:12px;color:var(--green);font-weight:600;text-align:center;
+  height:17px;margin-top:10px;
+}
+/* In the header it sits beside the title rather than under a form, so it
+   confirms a save without the pane having to scroll to reveal it. */
+.modal-head .saved{margin:0;height:auto;font-size:11.5px;text-align:right}
+
+.foot{
+  border-top:1px solid var(--line-soft);
+  padding:22px;text-align:center;
+  font-size:11.5px;color:var(--ink-mute);
+}
+.foot span{margin:0 9px}
+
+@media (max-width:900px){
+  .veh{grid-template-columns:152px 1fr 128px 36px;gap:13px}
+  .scene{width:148px;height:113px}
+  .usoe{font-size:24px}
+  .hero h1{font-size:29px}
+}
+@media (max-width:640px){
+  .veh{grid-template-columns:1fr 44px;grid-template-areas:"scene x" "id id" "read read";gap:10px}
+  .scene{grid-area:scene;width:100%;height:150px}
+  .veh-id{grid-area:id}
+  .readout{grid-area:read;text-align:left}
+  .btn-x{grid-area:x}
+  .entry{flex-direction:column}
+  .btn-primary{width:100%}
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════ NAV ══════════════════════════ -->
+<nav class="nav">
+  <div class="wordmark">TESLA</div>
+  <div class="nav-div"></div>
+  <div class="nav-title">Charging Tracker</div>
+  <div class="env-chip" id="envChip" title="Pointed at engineering Garage">Engineering</div>
+  <div class="nav-spacer"></div>
+
+  <button class="nav-btn bell-wrap" id="bellBtn" title="Activity log">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+    </svg>
+    <span class="bell-badge" id="bellBadge" hidden>0</span>
+  </button>
+
+  <button class="nav-btn" id="adminBtn" title="Admin settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+    Admin
+  </button>
+</nav>
+
+<!-- ══════════════════════════ HERO ══════════════════════════ -->
+<header class="hero">
+  <svg class="hero-art" viewBox="0 0 1440 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <defs>
+      <!-- Accent-driven, so the floor glow follows the environment. -->
+      <linearGradient id="hgGlow" x1="0" y1="1" x2="0" y2="0">
+        <stop class="accent-stop" offset="0%"   stop-opacity=".30"/>
+        <stop class="accent-stop" offset="100%" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="hgFade" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%"   stop-color="#fff" stop-opacity="0"/>
+        <stop offset="22%"  stop-color="#fff" stop-opacity=".16"/>
+        <stop offset="78%"  stop-color="#fff" stop-opacity=".16"/>
+        <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <!-- floor glow -->
+    <rect x="0" y="170" width="1440" height="130" fill="url(#hgGlow)"/>
+    <!-- stall bay dividers -->
+    <g stroke="url(#hgFade)" stroke-width="1.5" fill="none">
+      <path d="M0 232 H1440"/><path d="M0 262 H1440"/>
+    </g>
+    <!-- abstract supercharger posts in a row -->
+    <g fill="none" stroke="#fff" stroke-opacity=".17" stroke-width="2">
+      <g><path d="M120 232 V150 a9 9 0 0 1 18 0 V232"/><path d="M104 232 h50"/></g>
+      <g><path d="M400 232 V150 a9 9 0 0 1 18 0 V232"/><path d="M384 232 h50"/></g>
+      <g><path d="M680 232 V150 a9 9 0 0 1 18 0 V232"/><path d="M664 232 h50"/></g>
+      <g><path d="M960 232 V150 a9 9 0 0 1 18 0 V232"/><path d="M944 232 h50"/></g>
+      <g><path d="M1240 232 V150 a9 9 0 0 1 18 0 V232"/><path d="M1224 232 h50"/></g>
+    </g>
+    <!-- accent bands on posts -->
+    <g class="accent-fill" fill-opacity=".5">
+      <rect x="123" y="160" width="12" height="3" rx="1.5"/>
+      <rect x="403" y="160" width="12" height="3" rx="1.5"/>
+      <rect x="683" y="160" width="12" height="3" rx="1.5"/>
+      <rect x="963" y="160" width="12" height="3" rx="1.5"/>
+      <rect x="1243" y="160" width="12" height="3" rx="1.5"/>
+    </g>
+    <!-- charge arcs -->
+    <g stroke="#fff" stroke-opacity=".09" stroke-width="1.5" fill="none">
+      <path d="M138 176 q60 22 118 26"/><path d="M418 176 q60 22 118 26"/>
+      <path d="M698 176 q60 22 118 26"/><path d="M978 176 q60 22 118 26"/>
+    </g>
+  </svg>
+
+  <div class="hero-inner">
+    <h1>Charging Tracker</h1>
+    <p>Live Supercharging oversight. Enter one or more VINs to track usable state of energy through to your target charge level.</p>
+
+    <div class="entry">
+      <input id="vinInput" placeholder="Enter VIN — separate multiple with commas, spaces or new lines"
+             autocomplete="off" spellcheck="false" />
+      <button class="btn-primary" id="monitorBtn">Monitor</button>
+    </div>
+    <div class="entry-msg" id="entryMsg"></div>
+  </div>
+</header>
+
+<!-- ══════════════════════════ STATS ══════════════════════════ -->
+<section class="strip">
+  <div class="stat" data-filter="all"      role="button" tabindex="0" title="Show every monitored vehicle"><div class="stat-k">Monitored</div><div class="stat-v" id="sMon">0</div></div>
+  <div class="stat" data-filter="charging" role="button" tabindex="0" title="Show only vehicles currently charging"><div class="stat-k">Charging</div><div class="stat-v" id="sChg">0</div></div>
+  <div class="stat" data-filter="complete" role="button" tabindex="0" title="Show only finished vehicles"><div class="stat-k">Complete</div><div class="stat-v" id="sCom">0</div></div>
+  <div class="stat" data-filter="offsite"  role="button" tabindex="0" title="Show only vehicles outside the main geofence"><div class="stat-k">Offsite</div><div class="stat-v" id="sOff">0</div></div>
+  <div class="stat"><div class="stat-k">Charge limit</div><div class="stat-v" id="sLim">80.0<small>%</small></div></div>
+  <div class="stat"><div class="stat-k" id="sNextK">Next refresh</div><div class="stat-v" id="sNext">—</div></div>
+</section>
+
+<!-- Garage sign-in prompt (live mode only) -->
+<div class="banner" id="authBanner" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+  </svg>
+  <div class="banner-t">
+    <b>Not signed in to <span id="authBannerEnv">Production</span> Garage.</b>
+    Live USOE data needs a Bouncer sign-in. You must be on the Tesla network or VPN.
+  </div>
+  <a class="banner-btn" id="authBannerBtn" href="/auth/login">Sign in</a>
+</div>
+
+<!-- ══════════════════════════ LIST ══════════════════════════ -->
+<main class="wrap">
+  <div class="list-head">
+    <h2>Monitored vehicles</h2>
+    <button class="btn-ghost" id="refreshBtn">Refresh now</button>
+  </div>
+
+  <div class="list" id="list"></div>
+
+  <!-- Shown when a filter matches nothing but vehicles are being monitored,
+       so an empty screen reads as "none of these" rather than "broken". -->
+  <div class="filter-empty" id="filterEmpty" hidden></div>
+
+  <div class="empty" id="empty">
+    <svg viewBox="10 20 138 100" aria-hidden="true">
+      <ellipse cx="79" cy="113" rx="62" ry="4.5" fill="#171A20" opacity=".08"/>
+      <path d="M22 110.2 C20.5 104 19.7 90 19.7 80 C19.8 71 22 65 27.3 61.7
+               C30 59.5 33 56.5 37.1 53.3 C39 44 52 29.2 79 29
+               C106 29.2 119 44 120.9 53.3 C125 56.5 128 59.5 130.7 61.7
+               C136 65 138.2 71 138.3 80 C138.3 90 137.5 104 136 110.2 Z"
+            fill="#171A20" opacity=".18"/>
+    </svg>
+    <h3>No vehicles monitored</h3>
+    <p>Enter a VIN above and select Monitor to begin tracking.</p>
+  </div>
+</main>
+
+<footer class="foot">
+  <span id="fMode">Simulation mode</span>·<span id="fEnv">Production Garage</span>·<span>Reading <b>USOE</b> (usable state of energy)</span>·<span>Charging Tracker</span>
+</footer>
+
+<!-- ══════════════════════════ OVERLAYS ══════════════════════════ -->
+<div class="scrim" id="scrim"></div>
+
+<!-- Notifications -->
+<aside class="panel" id="panel" aria-label="Activity log">
+  <div class="panel-head">
+    <h3>Activity log</h3>
+    <button class="btn-x" id="panelClose">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="panel-body" id="panelBody"></div>
+</aside>
+
+<!-- Admin -->
+<div class="modal" id="modal" role="dialog" aria-label="Admin settings">
+  <div class="modal-head">
+    <h3>Admin settings</h3>
+    <div class="sp"></div>
+    <div class="saved" id="savedMsg"></div>
+    <button class="btn-x" id="modalClose">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  <!-- Password gate -->
+  <div class="modal-body" id="gate">
+    <div class="lock-ic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+    </div>
+    <div class="gate-t">Restricted area. Enter the 6-digit admin code.</div>
+    <div class="otp" id="otp">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="1" aria-label="Digit 1">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 2">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 3">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 4">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 5">
+      <input class="otp-box" type="password" inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 6">
+    </div>
+    <div class="gate-err" id="gateErr"></div>
+    <button class="btn-block solid" id="pwBtn">Unlock</button>
+  </div>
+
+  <!-- Settings: rail of sections beside a scrolling pane -->
+  <div class="admin" id="settings" hidden>
+
+    <nav class="admin-rail" id="adminRail" aria-label="Settings sections">
+      <button class="rail-item on" data-sec="environment">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18"/>
+        </svg>
+        Environment
+        <span class="warn" id="railWarnEnv" hidden></span>
+      </button>
+      <button class="rail-item" data-sec="charging">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2 3 14h8l-1 8 10-12h-8z"/>
+        </svg>
+        Charging
+      </button>
+      <button class="rail-item" data-sec="data">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>
+        </svg>
+        Data source
+      </button>
+      <button class="rail-item" data-sec="live">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12h4l3 8 4-16 3 8h4"/>
+        </svg>
+        Live vitals
+        <span class="warn" id="railWarnLive" hidden></span>
+      </button>
+      <button class="rail-item" data-sec="alerts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+        </svg>
+        Alerts
+        <span class="warn" id="railWarnAlerts" hidden></span>
+      </button>
+      <button class="rail-item" data-sec="maintenance">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/>
+        </svg>
+        Maintenance
+      </button>
+      <div class="rail-foot" id="railFoot"></div>
+    </nav>
+
+    <div class="admin-pane" id="adminPane">
+
+    <!-- ── Environment ─────────────────────────────────────────────────── -->
+    <section class="sec on" data-sec="environment">
+      <h4 class="sec-h">Environment</h4>
+      <p class="sec-p">
+        Which Garage instance the dashboard reads from. Each keeps its own
+        sign-in, its own live-read cookie and its own vehicle list, so
+        switching never mixes the two fleets or loses what you were watching.
+      </p>
+
+      <div class="field">
+        <label>Active instance</label>
+        <div class="seg" id="envSeg">
+          <button data-env="prod">Production</button>
+          <button data-env="eng">Engineering</button>
+        </div>
+        <div id="envRows"></div>
+        <div class="hint" id="envHint"></div>
+        <div class="hint">
+          Engineering runs at <code>garage.dev.teslamotors.com</code> and holds
+          pre-production and engineering VINs that do not exist in production.
+          It is a separate Bouncer registration, so it needs its own sign-in —
+          and its own session cookie if you want live read there.<br>
+          In engineering the dashboard turns yellow and the vehicle graphic
+          becomes a Cybercab, so a screenshot is never ambiguous about which
+          fleet it came from.
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Charging ────────────────────────────────────────────────────── -->
+    <section class="sec" data-sec="charging">
+      <h4 class="sec-h">Charging</h4>
+      <p class="sec-p">
+        The target every monitored vehicle is measured against, and how often
+        that measurement is taken.
+      </p>
+
+    <div class="field">
+      <label for="limitInput">Target charge level (%)</label>
+      <input class="inp" id="limitInput" type="number" min="1" max="100" step="0.1" />
+      <div class="chips" id="limitChips">
+        <button class="chip" data-limit="70">70.0</button>
+        <button class="chip" data-limit="80">80.0</button>
+        <button class="chip" data-limit="90">90.0</button>
+        <button class="chip" data-limit="100">100.0</button>
+      </div>
+      <div class="hint">A vehicle is marked complete once USOE reaches this value.</div>
+    </div>
+
+    <div class="field">
+      <label for="intervalInput">Refresh interval</label>
+      <div class="row2">
+        <input class="inp" id="intervalInput" type="number" min="5" step="1" />
+        <select class="inp" id="intervalUnit">
+          <option value="1">Seconds</option>
+          <option value="60">Minutes</option>
+        </select>
+      </div>
+      <div class="chips" id="ivChips">
+        <button class="chip" data-sec="20">20s</button>
+        <button class="chip" data-sec="60">1m</button>
+        <button class="chip" data-sec="300">5m</button>
+        <button class="chip" data-sec="900">15m</button>
+      </div>
+      <div class="hint">Minimum 5 seconds. Completed vehicles are dropped from the list after 2 intervals.</div>
+    </div>
+
+    <div class="field">
+      <label>Completed vehicles</label>
+      <label class="switch">
+        <input type="checkbox" id="autoClear" />
+        <span>Auto-clear when finished</span>
+      </label>
+      <div class="hint">
+        On — removed from the list after 2 refresh intervals.<br>
+        Off — collected into a collapsible <b>Fully charged</b> group at the bottom,
+        where they stay until cleared.
+      </div>
+    </div>
+    </section>
+
+    <!-- ── Data source ─────────────────────────────────────────────────── -->
+    <section class="sec" data-sec="data">
+      <h4 class="sec-h">Data source</h4>
+      <p class="sec-p">
+        Where readings come from, how hard the dashboard is allowed to poll for
+        them, and which site counts as home.
+      </p>
+
+    <div class="field">
+      <label for="srcSelect">Source</label>
+      <select class="inp" id="srcSelect">
+        <option value="sim">Simulation (no backend required)</option>
+        <option value="live">Live endpoint</option>
+      </select>
+      <input class="inp" id="endpointInput" style="margin-top:9px" placeholder="http://localhost:8080/api/usoe" />
+      <div class="hint">Live mode issues <code>GET &lt;endpoint&gt;?vin=…</code> and expects <code>{"vin":"…","usoe":63.5}</code>. See README to wire this to Garage.</div>
+    </div>
+
+    <div class="field">
+      <label for="concInput">Request throttle</label>
+      <div class="row2">
+        <input class="inp" id="concInput" type="number" min="1" max="16" step="1" />
+        <input class="inp" id="spaceInput" type="number" min="0" max="5000" step="10" />
+      </div>
+      <div class="hint">
+        Left: simultaneous requests (1–16). Right: minimum gap between request
+        starts, in milliseconds. Defaults of 4 and 150&nbsp;ms cap a sweep at
+        roughly 6–7&nbsp;req/s, so a 100-VIN list won't stampede Garage.
+      </div>
+      <div class="hint" id="sweepEstimate"></div>
+    </div>
+
+    <div class="field">
+      <label for="trtInput">Main geofence TRT</label>
+      <input class="inp" id="trtInput" type="number" step="1" min="0" />
+      <div class="hint">
+        Vehicles inside this facility geofence show no tag. Anything at a
+        different TRT — or in no geofence at all — is tagged
+        <span class="badge geo" style="vertical-align:middle">Offsite</span>.
+        Default <b>17589</b> (Houston&nbsp;-&nbsp;Cypress).
+      </div>
+    </div>
+
+    </section>
+
+    <!-- ── Live vitals ─────────────────────────────────────────────────── -->
+    <section class="sec" data-sec="live">
+      <h4 class="sec-h">Live vitals</h4>
+      <p class="sec-p">
+        Real-time readings straight off the vehicle instead of Garage's cached
+        snapshots. Configured separately for each environment — the cookie
+        below belongs to <b id="liveEnvName">Production</b>.
+      </p>
+
+      <div class="live-state" id="liveBubble" title="Live read activity">
+        <span class="bulb"></span>
+        <span id="liveBubbleText">Off</span>
+        <span class="sub" id="liveBubbleSub"></span>
+      </div>
+
+    <div class="field">
+      <label for="liveCookie">Session cookie</label>
+      <label class="switch">
+        <input type="checkbox" id="liveToggle" />
+        <span>Enable live read</span>
+      </label>
+      <input class="inp" id="liveCookie" type="password" style="margin-top:9px"
+             autocomplete="off" spellcheck="false"
+             placeholder="Paste the whole Cookie: header from Garage" />
+      <div class="row2" style="margin-top:9px">
+        <button class="btn-block" id="liveSaveBtn" style="margin-bottom:0">Save cookie</button>
+        <button class="btn-block" id="liveTestBtn" style="margin-bottom:0">Test</button>
+      </div>
+      <div class="hint" id="liveStatus"></div>
+      <div class="hint">
+        <b>Off</b> — everything reads Garage's cached snapshots, which trail by
+        8–12 minutes while a car is charging and much longer once it is parked.
+        This is how the dashboard has always worked.<br>
+        <b>On</b> — every monitored vehicle is read in real time, so a completion
+        is caught in seconds instead of minutes. One live read is ~140&nbsp;KB, so
+        a sweep of 100 vehicles moves roughly 14&nbsp;MB; fine for the short lists
+        this is normally used with, worth knowing before loading it up. Any live
+        failure silently falls back to the cached path.<br>
+        <b>Latch detection depends on this.</b> The "still plugged in" tag and
+        its reminders read <code>CP_proximity</code>, which exists only in the
+        live vitals dump — Garage's cached snapshots carry no charge-port
+        columns at all. With live read off, the dashboard cannot tell whether a
+        finished vehicle is still on the charger, and those alerts never fire.
+        A sleeping vehicle also answers the live endpoint with a 408, so
+        proximity goes unreadable until it wakes; reminders pause rather than
+        repeat on a stale reading.<br>
+        Cookie: in Garage press <b>F12 → Network</b>, click any request, find
+        <b>Request Headers</b>, and copy the entire <code>Cookie:</code> value.
+        This is your full Garage identity — it is stored in
+        <code>.garage.json</code> on this machine only, never sent back to this
+        page, and never committed. It expires on Garage's own schedule; when it
+        does, live read switches itself off and says so.
+      </div>
+    </div>
+
+    </section>
+
+    <!-- ── Alerts ──────────────────────────────────────────────────────── -->
+    <section class="sec" data-sec="alerts">
+      <h4 class="sec-h">Alerts</h4>
+      <p class="sec-p">
+        Where a charge-complete card is posted. Shared across environments —
+        an engineering completion says so on the card rather than going
+        somewhere else.
+      </p>
+
+      <div class="live-state" id="alertBubble" title="Alert delivery state">
+        <span class="bulb"></span>
+        <span id="alertBubbleText">Off</span>
+        <span class="sub" id="alertBubbleSub"></span>
+      </div>
+
+    <div class="field">
+      <label>Delivery</label>
+      <label class="switch">
+        <input type="checkbox" id="alertsMuted" />
+        <span>Mute all alerts</span>
+      </label>
+      <div class="hint">
+        Stops every card being posted while leaving the webhook configured, so
+        you can go quiet for an afternoon without losing the URL and having to
+        paste it back afterwards. Held server-side, so it applies to this
+        machine's tracker no matter which browser or tab is open.<br>
+        <b>Send test still works while muted</b> — pressing it is an explicit
+        request, and a test button that silently did nothing would be
+        indistinguishable from a broken webhook.
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="latchAfterInput">Still-latched reminders</label>
+      <div class="row2">
+        <input class="inp" id="latchAfterInput" type="number" min="1" max="99" step="1" />
+        <input class="inp" id="latchEveryInput" type="number" min="0" max="99" step="1" />
+      </div>
+      <div class="chips" id="latchChips">
+        <button class="chip" data-after="1" data-every="1">Every cycle</button>
+        <button class="chip" data-after="2" data-every="2">2 then every 2</button>
+        <button class="chip" data-after="2" data-every="6">2 then every 6</button>
+        <button class="chip" data-after="2" data-every="0">Once only</button>
+      </div>
+      <div class="hint">
+        Left: latched cycles after a vehicle finishes before the first card.
+        Right: cycles between repeats — <b>0</b> sends one card and stops.
+      </div>
+      <div class="hint" id="latchEstimate"></div>
+      <div class="hint">
+        Counted in refresh cycles rather than minutes, because that is the only
+        clock the monitor has. Change the refresh interval and these move with
+        it — the line above shows what they currently work out to.<br>
+        Needs <b>live read</b>: without it the charge port cannot be read at
+        all and no latch reminder will ever fire, whatever this is set to.
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="teamsInput">Teams alert webhook</label>
+      <input class="inp" id="teamsInput" type="url" autocomplete="off" spellcheck="false"
+             placeholder="https://…/paths/invoke?api-version=1&amp;sp=…&amp;sig=…" />
+      <input class="inp" id="teamsTestMsg" style="margin-top:9px" maxlength="2000"
+             autocomplete="off"
+             placeholder="Test message text — blank sends a sample charge-complete card" />
+      <div class="row2" style="margin-top:9px">
+        <button class="btn-block" id="teamsSaveBtn" style="margin-bottom:0">Save</button>
+        <button class="btn-block" id="teamsTestBtn" style="margin-bottom:0">Send test</button>
+      </div>
+      <div class="hint" id="teamsStatus"></div>
+      <div class="hint">
+        Your own Power Automate flow URL — <b>When an HTTP request is received</b>
+        into <b>Post message in a chat or channel</b>. Held server-side in
+        <code>.teams.json</code>, never in the browser, and never sent back to
+        this page, so the box stays empty once saved.<br>
+        Paste the <b>whole</b> URL. Cut it at the first <code>&amp;</code> and it keeps
+        the path but loses the <code>sig</code> signature, and every alert then fails
+        with <code>401 DirectApiInvalidAuthorizationScheme</code> — which reads like a
+        blocked auth scheme rather than a missing one. Blank disables alerts.
+      </div>
+    </div>
+
+    </section>
+
+    <!-- ── Maintenance ─────────────────────────────────────────────────── -->
+    <section class="sec" data-sec="maintenance">
+      <h4 class="sec-h">Maintenance</h4>
+      <p class="sec-p">
+        Housekeeping for this browser. Removing vehicles affects the current
+        environment's list only.
+      </p>
+
+      <button class="btn-block" id="clearNotesBtn">Clear notifications</button>
+      <button class="btn-block red" id="clearVehBtn">Remove all vehicles</button>
+
+      <div class="sep"></div>
+      <button class="btn-block" id="lockBtn">Lock admin</button>
+    </section>
+
+    </div><!-- /admin-pane -->
+  </div><!-- /admin -->
+</div>
+
+<!-- Confirmation, for anything that reaches outside the page -->
+<div class="scrim top" id="confirmScrim"></div>
+<div class="confirm" id="confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <div class="confirm-ic" id="confirmIcon">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
+      <path d="M12 9v4M12 17h.01"/>
+    </svg>
+  </div>
+  <h3 id="confirmTitle">Are you sure?</h3>
+  <p class="confirm-t" id="confirmText"></p>
+
+  <div class="confirm-facts" id="confirmFacts" hidden></div>
+
+  <div class="confirm-btns">
+    <button class="btn-block" id="confirmNo">Cancel</button>
+    <button class="btn-block solid" id="confirmYes">Confirm</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════════════════════
+   Charging Tracker
+   Tracks USOE (usable state of energy) per VIN through to a target level.
+   Deliberately reads USOE, NOT the raw SOC vitals column — they are two
+   distinct fields and USOE is the customer-facing number.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const ADMIN_PASSWORD = "226565";
+
+/* When the page is served by server.js the Garage proxy sits on the same
+   origin, so default to live data. Opened straight off disk (file://) there
+   is no proxy, so fall back to simulation instead of failing. */
+const SERVED = location.protocol === "http:" || location.protocol === "https:";
+
+const DEFAULTS = {
+  chargeLimit : 80.0,                     // percent
+  intervalSec : 300,                      // 5 minutes
+  source      : SERVED ? "live" : "sim",  // "sim" | "live"
+  endpoint    : SERVED ? "/api/usoe" : "",
+
+  // Throttling. A 100+ VIN list must not fire 100 simultaneous requests at
+  // Garage, so a sweep runs at most `concurrency` in flight and starts no
+  // more than one request every `spacingMs`.
+  concurrency : 4,
+  spacingMs   : 150,
+
+  // Home site. A vehicle whose facility geofence TRT differs from this — or
+  // which is in no geofence at all — is flagged offsite. 17589 is
+  // Houston - Cypress.
+  mainTrt     : 17589,
+
+  // true  → completed vehicles drop off the list after REMOVE_AFTER_TICKS
+  // false → they collect in a collapsible group at the bottom instead
+  autoClear     : true,
+  doneCollapsed : true,
+
+  // Still-latched reminders, in refresh cycles.
+  //   latchAfter — latched cycles after finishing before the first card
+  //   latchEvery — cycles between repeats; 0 sends one card and stops
+  latchAfter    : 2,
+  latchEvery    : 2
+};
+
+const REMOVE_AFTER_TICKS = 2;   // intervals to wait after completion
+
+/* Consecutive refreshes with no measurable gain before a vehicle stops being
+   treated as plugged in at all. One flat cycle greys it out; this many drops
+   it back to awaiting data. */
+const STALL_TO_PENDING = 3;
+
+/* Minimum rise, in percent, that counts as charging.
+
+   This has to clear sensor noise. Live reads report full float precision and
+   wobble by a few hundredths between calls — a parked vehicle was observed
+   going 79.951 → 79.745 → 80.01 while doing nothing at all. The original
+   0.049 threshold sat inside that noise band, so idle cars announced
+   themselves as charging.
+
+   Real charging is nowhere near this small: supercharging produced +9.2 and
+   +5.0 percentage points between consecutive readings. The gap between noise
+   and signal is wide, so this sits well above the former without risking a
+   missed charge.
+
+   If very slow AC charging is ever monitored on a short refresh interval,
+   the per-cycle gain shrinks and this may need lowering. */
+const MIN_RISE = 0.3;
+
+/* ── Charge-port latch ─────────────────────────────────────────────────
+   A vehicle that finished charging but is still latched to the Supercharger
+   is occupying a stall it no longer needs. Garage reports this as
+   `CP_proximity`, the "Proximity: DISCONNECTED / LATCHED" line in the vitals
+   tab, and the dashboard chases it until the connector comes out.
+
+   REQUIRES LIVE READ. CP_proximity exists only in the live vitals dump —
+   the cached historical set carries no CP_* columns at all — so with live
+   read off the proximity is genuinely unknowable, not merely stale.
+
+   The three-way state matters. DISCONNECTED and LATCHED are facts; null is
+   "we could not tell", which happens whenever live read is off or the car is
+   asleep (the live endpoint answers 408 for a sleeping vehicle). Null is
+   never treated as either fact: reading it as disconnected would silently
+   stop monitoring a car that is still plugged in, and reading it as latched
+   would nag forever about a car that was unplugged while asleep. So an
+   unknown reading holds the last known state, and after LATCH_STALE_CYCLES
+   of it the reminders pause rather than fire on a stale assumption.       */
+/* Reminder cadence lives in settings (Admin → Alerts) rather than here — how
+   nagging is appropriate depends on the site, and on how long a car can sit
+   on a stall before it matters. Counted in REFRESH CYCLES, not minutes, since
+   that is the only clock the monitor actually has; the admin panel does the
+   arithmetic against the current interval so the real-world spacing is
+   visible while you set it.
+
+   LATCH_STALE_CYCLES stays fixed: it is not a preference but the safety valve
+   that stops reminders firing on a reading too old to be true. */
+const LATCH_STALE_CYCLES = 3;   // unreadable cycles before reminders pause
+
+const isLatched = v => v.proximity === "LATCHED";
+
+/* Whether to SHOW the latched treatment — the red pill and the top-of-list
+   placement. Deliberately narrower than isLatched().
+
+   A charging vehicle is latched too, by definition, so tagging on the raw
+   latch state put the badge on every car on a charger and made it mean
+   nothing. The tag is a call to action — "this one is done, go unplug it" —
+   which is only true once it has finished. isLatched() stays the raw fact and
+   still drives the polling, the auto-clear exemption and the reminders. */
+const needsUnplug = v => v.status === "complete" && isLatched(v);
+
+/* Pack current, in amps, above which the vehicle is taking charge.
+
+   Measured baselines from real vehicles: a parked car sits at -0.5 to -1.0 A
+   of parasitic drain, and driving reached -90.9 A. The only large POSITIVE
+   reading observed on a non-charging car was +46.8 A, which was regenerative
+   braking mid-drive — and that cannot reach this test, because a car in a
+   drive is not latched and the latch gate below runs first. So the floor only
+   has to clear idle noise, not regen.
+
+   A real charge is far above this: 11 kW AC at ~375 V pack is roughly 29 A,
+   and DC fast charging is in the hundreds. Not yet observed mid-charge, hence
+   the deliberately low floor and the corroboration rule in isCharging(). */
+const MIN_CHARGE_AMPS = 1.0;
+
+/* Is this vehicle taking charge right now?
+
+   Returns true / false when it can be established, and null when there is no
+   basis for an answer — which is the signal to fall back to inference.
+
+   Latch is the GATE, not the answer. "Latched" means a connector is present,
+   which is equally true of a car that has finished charging, and of one that
+   is plugged in and faulted. Treating latched as charging would have flipped
+   every completed-but-latched vehicle straight back to "Charging" and undone
+   the latch reminders entirely.
+
+   Past the gate, any positive evidence counts: measured current, or the
+   charge level rising. The OR matters — if MIN_CHARGE_AMPS turns out to be
+   set wrong for some vehicle, a genuinely charging car is still caught by its
+   own charge level going up, so a bad threshold degrades to the old
+   behaviour rather than breaking detection. */
+function isCharging(v, rising){
+  // Only a reading from THIS cycle counts. v.proximity is deliberately held
+  // over across a failed read — a connector does not unplug itself, so "still
+  // latched" survives a sleeping vehicle. But "drawing power right now" is a
+  // question about this instant, and a held-over value cannot answer it.
+  //
+  // Without this, a car that fell asleep mid-session reported "charging"
+  // forever off a stale latch reading. Caught by the sleeps-mid-charge case.
+  if(!v.proximity || (v.proxUnknown || 0) > 0) return null;
+
+  if(v.proximity !== "LATCHED") return false;   // nothing plugged in
+
+  const amps = v.packAmps;
+  if(amps == null) return true;             // latched, current unreadable
+  return amps > MIN_CHARGE_AMPS || rising;
+}
+
+/* ───────────────────────────── Environment ─────────────────────────────
+   Production and Engineering are different Garage instances holding
+   different fleets, so the monitored list is stored PER ENVIRONMENT rather
+   than shared. Switching then keeps both lists intact instead of forcing a
+   choice between wiping the list and showing prod VINs against dev data.
+
+   Production deliberately keeps the original un-suffixed storage keys, so an
+   existing install carries its list across this change untouched.
+
+   Settings and the activity log stay global — a refresh interval or a target
+   charge level means the same thing in either world.                      */
+const ENV_LABEL = { prod: "Production", eng: "Engineering" };
+
+const vehKeyFor = k => k === "prod" ? "ct.vehicles" : `ct.vehicles.${k}`;
+const simKeyFor = k => k === "prod" ? "ct.sim"      : `ct.sim.${k}`;
+const simLatchKeyFor = k => k === "prod" ? "ct.simlatch" : `ct.simlatch.${k}`;
+
+/* Simulated cars stay latched for this many cycles after reaching the target
+   before "someone" unplugs them, so the whole latch flow — tag, reminders,
+   removal on disconnect — can be exercised without a real vehicle. */
+const SIM_LATCH_CYCLES = 6;
+
+/* Read synchronously so the first paint is already in the right environment;
+   the server is asked immediately afterwards and wins any disagreement. */
+let envKey = (() => {
+  try{ return ENV_LABEL[localStorage.getItem("ct.env")] ? localStorage.getItem("ct.env") : "prod"; }
+  catch{ return "prod"; }
+})();
+
+const isEng = () => envKey === "eng";
+
+const KEY = {
+  veh     : vehKeyFor(envKey),
+  sim     : simKeyFor(envKey),
+  simLatch: simLatchKeyFor(envKey),
+  set     : "ct.settings",
+  note    : "ct.notes"
+};
+
+/* ───────────────────────────── Persistence ───────────────────────────── */
+function load(key, fallback){
+  try{
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : structuredClone(fallback);
+  }catch{ return structuredClone(fallback); }
+}
+function save(key, val){
+  try{ localStorage.setItem(key, JSON.stringify(val)); }catch{ /* private mode */ }
+}
+
+let settings = Object.assign({}, DEFAULTS, load(KEY.set, {}));
+let vehicles = load(KEY.veh, []);
+let notes    = load(KEY.note, []);
+let simState = load(KEY.sim, {});     // vin -> simulated usoe
+let simLatch = load(KEY.simLatch, {}); // vin -> cycles spent latched, simulation only
+
+const persistAll = () => {
+  save(KEY.veh, vehicles); save(KEY.set, settings); save(KEY.note, notes);
+  save(KEY.sim, simState); save(KEY.simLatch, simLatch);
+};
+
+/* ───────────────────────────── Helpers ───────────────────────────── */
+const $  = id => document.getElementById(id);
+const pct = n => (n==null || Number.isNaN(n)) ? "—" : n.toFixed(1);
+const shortVin = v => v.length > 8 ? "…" + v.slice(-8) : v;
+
+function clockTime(ts){
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+}
+function relTime(ts){
+  const s = Math.max(0, Math.round((Date.now()-ts)/1000));
+  if(s < 60)   return s + "s ago";
+  if(s < 3600) return Math.floor(s/60) + "m ago";
+  return Math.floor(s/3600) + "h ago";
+}
+/* Garage reports naive UTC stamps ("2026-07-29T03:20:30"). Left alone, JS
+   would read those as local time and place them in the future. */
+function parseGarageTime(s){
+  if(!s) return null;
+  const iso = /[Zz]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z";
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+function mmss(sec){
+  sec = Math.max(0, Math.round(sec));
+  return String(Math.floor(sec/60)).padStart(2,"0") + ":" + String(sec%60).padStart(2,"0");
+}
+
+/* A Tesla VIN is 17 chars; I, O and Q are never used. */
+function validateVin(raw){
+  const vin = raw.trim().toUpperCase();
+  if(!vin)                      return {ok:false, err:"VIN is empty."};
+  if(vin.length !== 17)         return {ok:false, err:`"${vin}" is ${vin.length} characters — a VIN must be 17.`};
+  if(!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin))
+                                return {ok:false, err:`"${vin}" contains invalid characters (letters I, O and Q are not used in VINs).`};
+  return {ok:true, vin};
+}
+
+/* ───────────────────────────── Request throttling ─────────────────────────────
+   Two limits work together across a sweep:
+     · a global rate gate — no more than one request started per spacingMs;
+     · a worker pool     — at most `concurrency` requests in flight.
+   With 100 VINs at the defaults that's a ~6-7 req/s ceiling and 4 open
+   sockets, rather than a 100-request stampede.                            */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+let nextSlot = 0;
+async function rateGate(spacingMs){
+  const now = Date.now();
+  const at  = Math.max(now, nextSlot);
+  nextSlot  = at + spacingMs;
+  if(at > now) await sleep(at - now);
+}
+
+async function runPooled(items, worker, {concurrency, spacingMs, onProgress}){
+  let next = 0, done = 0;
+  const lanes = Math.max(1, Math.min(concurrency, items.length));
+
+  const lane = async () => {
+    while(true){
+      const i = next++;
+      if(i >= items.length) return;
+      if(spacingMs > 0) await rateGate(spacingMs);
+      try{ await worker(items[i], i); }catch{ /* the worker handles its own errors */ }
+      if(onProgress) onProgress(++done, items.length);
+    }
+  };
+  await Promise.all(Array.from({length: lanes}, lane));
+}
+
+/* Repainting a 100-row list on every completion is wasteful — coalesce into
+   at most one render every 400ms while a sweep is in flight. */
+let renderQueued = false;
+function scheduleRender(){
+  if(renderQueued) return;
+  renderQueued = true;
+  setTimeout(() => { renderQueued = false; render(); }, 400);
+}
+
+/* ───────────────────────────── Notifications ─────────────────────────────
+   Audit-log only. State transitions are recorded; incremental charge-level
+   changes deliberately are not — that would just be noise.               */
+function notify(type, html){
+  notes.unshift({ id: crypto.randomUUID(), type, html, ts: Date.now(), read:false });
+  if(notes.length > 300) notes.length = 300;
+  save(KEY.note, notes);
+  renderNotes();
+}
+
+const NOTE_ICONS = {
+  success:'<path d="M20 6 9 17l-5-5"/>',
+  info   :'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  charge :'<path d="M13 2 3 14h8l-1 8 10-12h-8z"/>',
+  error  :'<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>'
+};
+
+function renderNotes(){
+  const body = $("panelBody");
+  if(!notes.length){
+    body.innerHTML = '<div class="note-empty">No activity recorded yet.</div>';
+  }else{
+    body.innerHTML = notes.map(n => `
+      <div class="note ${n.read ? "" : "unread"}">
+        <div class="note-ic ${n.type}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">${NOTE_ICONS[n.type] || NOTE_ICONS.info}</svg>
+        </div>
+        <div class="note-txt">
+          <div class="note-msg">${n.html}</div>
+          <div class="note-ts">${clockTime(n.ts)} · ${relTime(n.ts)}</div>
+        </div>
+      </div>`).join("");
+  }
+  const unread = notes.filter(n => !n.read).length;
+  const badge = $("bellBadge");
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 99 ? "99+" : unread;
+}
+
+/* ───────────────────────────── Data source ─────────────────────────────
+   fetchUsoe(vin) resolves to a number 0-100, or throws.
+   Simulation follows a tapering Supercharger curve so the demo behaves
+   the way a real session does: fast to 50%, slowing hard past 80%.      */
+function simCurveGain(cur){
+  let rate;
+  if(cur < 20)      rate = 5.5;
+  else if(cur < 50) rate = 4.4;
+  else if(cur < 70) rate = 2.9;
+  else if(cur < 85) rate = 1.7;
+  else              rate = 0.85;
+  return rate * (0.62 + Math.random() * 0.76);
+}
+
+/* wantLive asks the proxy for a real-time read instead of a cached snapshot.
+   It is only honoured when live read is switched on in Admin, and any failure
+   falls back to the cached path server-side — so passing it is always safe. */
+async function fetchUsoe(vin, wantLive){
+  if(settings.source === "live"){
+    const base = (settings.endpoint || "").trim();
+    if(!base) throw new Error("No live endpoint configured");
+    const url = base + (base.includes("?") ? "&" : "?") + "vin=" + encodeURIComponent(vin)
+              + (wantLive ? "&live=1" : "");
+    const res  = await fetch(url, {headers:{Accept:"application/json"}});
+    const data = await res.json().catch(() => null);
+
+    // The proxy answers 401 + needsAuth when the Garage token is missing or
+    // expired. Surface one banner rather than an error per vehicle.
+    if(res.status === 401 && data && data.needsAuth){
+      showAuthBanner(data.loginUrl, data.envLabel);
+      const e = new Error("Not signed in to Garage");
+      e.needsAuth = true;
+      throw e;
+    }
+    if(!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
+    hideAuthBanner();
+
+    const val = typeof data === "number" ? data : (data.usoe ?? data.USOE ?? data.value);
+    if(typeof val !== "number" || Number.isNaN(val)) throw new Error("Response missing a numeric usoe field");
+    return {
+      usoe     : Math.min(100, Math.max(0, val)),
+      readingAt: data.readingAt || null,
+      // null whenever the proxy could not read it — cached path, live read
+      // off, or a sleeping vehicle. Never coerced to a boolean here; the
+      // difference between "not latched" and "don't know" is the whole point.
+      proximity: (data && data.proximity) || null,
+      packAmps : (data && data.packAmps  != null) ? data.packAmps : null,
+      live     : Boolean(data && data.live),
+      liveError: (data && data.liveError) || null
+    };
+  }
+
+  // Simulation. Once past the target the simulated car stays plugged in for a
+  // few cycles before "someone" unplugs it, so the latch flow is testable
+  // end to end without a real vehicle.
+  if(simState[vin] == null) simState[vin] = 12 + Math.random() * 34;
+  else                      simState[vin] = Math.min(100, simState[vin] + simCurveGain(simState[vin]));
+  save(KEY.sim, simState);
+
+  const done = simState[vin] >= settings.chargeLimit;
+  if(done) simLatch[vin] = (simLatch[vin] || 0) + 1;
+  const proximity = !done ? "LATCHED"
+                  : (simLatch[vin] || 0) <= SIM_LATCH_CYCLES ? "LATCHED" : "DISCONNECTED";
+  save(KEY.simLatch, simLatch);
+
+  // Plausible pack current so the measured path is exercised too: a healthy
+  // DC charge while climbing, and the parasitic drain of a finished car
+  // sitting on the connector.
+  const packAmps = done ? -0.5 : 180 + Math.random() * 60;
+
+  return { usoe: simState[vin], readingAt: new Date().toISOString(), proximity, packAmps };
+}
+
+/* ───────────────────────────── Garage auth state ───────────────────────────── */
+function showAuthBanner(loginUrl, envLabel){
+  const b = $("authBanner");
+  if(loginUrl) $("authBannerBtn").href = loginUrl;
+  // Naming the environment matters here: signing in to the wrong Garage is
+  // the easy mistake to make once there are two of them.
+  const t = $("authBannerEnv");
+  if(t) t.textContent = envLabel || ENV_LABEL[envKey];
+  b.hidden = false;
+}
+function hideAuthBanner(){ $("authBanner").hidden = true; }
+
+/* Ask the proxy up front so the banner appears before the first poll. */
+async function checkGarageAuth(){
+  if(!SERVED || settings.source !== "live") { hideAuthBanner(); return; }
+  try{
+    const res  = await fetch("/api/auth/status", {headers:{Accept:"application/json"}});
+    const data = await res.json();
+    if(data.authenticated) hideAuthBanner();
+    else                   showAuthBanner(data.loginUrl, data.envLabel);
+  }catch{
+    /* proxy not running — live fetches will report it per-vehicle */
+  }
+}
+
+/* ───────────────────────────── Geofence (TRT) ─────────────────────────────
+   One batched call per sweep for the whole list — Tesladex takes an OR query,
+   so 100 VINs cost a couple of requests rather than a hundred. Failures are
+   swallowed: a geofence lookup must never interfere with charge monitoring. */
+async function refreshGeofences(){
+  if(!SERVED || settings.source !== "live") return;
+
+  const vins = vehicles.map(v => v.vin);
+  if(!vins.length) return;
+
+  try{
+    const res = await fetch("/api/geofence", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ vins })
+    });
+    if(!res.ok) return;
+
+    const { results } = await res.json();
+    if(!results) return;
+
+    for(const v of vehicles){
+      const g = results[v.vin];
+      if(!g) continue;
+      v.trtId    = g.trtId;            // null means no facility geofence
+      v.facility = g.name || null;
+      v.geoKnown = true;
+    }
+    save(KEY.veh, vehicles);
+  }catch{
+    /* geofence is supplementary — never let it break a sweep */
+  }
+}
+
+const isOffsite = v =>
+  v.geoKnown && Number(v.trtId) !== Number(settings.mainTrt);
+
+/* ───────────────────────────── Graphics ─────────────────────────────
+   A front elevation as a flat 2D silhouette with a Supercharger post
+   standing behind it. Drawing order matters: post and cable are painted
+   first so the car body occludes them, which is what sells the depth.
+
+   Two cars share one stage. Production draws a Model 3 Highland;
+   engineering draws a Cybercab. Both must expose the same two hooks —
+   a `.car-body` path and one or more `.lamp` strokes — because render()
+   tints those by charge state and knows nothing about which car it has.
+
+   ── Model 3 Highland ──
+   Proportions traced from a straight-on reference photograph: body is
+   1.43× as wide as it is tall, the cabin spans 62% of body width, and the
+   widest point is the front fender rather than the bumper. Highland cues:
+   no grille opening, lamps that slant DOWN towards the centre and taper to
+   a point, mirrors set high at the A-pillar base, and a large softly-creased
+   bonnet.                                                                */
+function carModel3(){
+  return `
+    <g>
+      <!-- mirrors, drawn under the body so they read as attached -->
+      <path d="M33.3 48.5 L25 47.5 C23.2 47.4 22.8 49 23.8 50.5 L25.5 52.3 L33.3 52.8 Z" fill="#33373C"/>
+      <path d="M124.7 48.5 L133 47.5 C134.8 47.4 135.2 49 134.2 50.5 L132.5 52.3 L124.7 52.8 Z" fill="#33373C"/>
+
+      <!-- body + cabin. The roof section is deliberately FLAT between the
+           A-pillars — an arc across the top is what made earlier passes read
+           as a dome rather than a car. -->
+      <path class="car-body" d="
+        M22 110.2
+        C20.5 104 19.7 90 19.7 80
+        C19.8 71 22 65 27.3 61.7
+        C30 59.5 33 56.5 37.1 53.3
+        C39 44 49 29.8 61 29.2
+        L97 29.2
+        C109 29.8 119 44 120.9 53.3
+        C125 56.5 128 59.5 130.7 61.7
+        C136 65 138.2 71 138.3 80
+        C138.3 90 137.5 104 136 110.2
+        Z"/>
+
+      <!-- glasshouse: flat roof, angled A-pillars -->
+      <path d="M39 52.5 C42 42.5 50 33.8 61 32 L97 32 C108 33.8 116 42.5 119 52.5 Z"
+            fill="#171A20" opacity=".56"/>
+
+      <!-- headlights: dark housings with a thin LED signature along the top
+           edge, as on the real car. The body colour carries vehicle state;
+           the LED strip only tints with it. -->
+      <path d="M46.5 79.2 L25 68.9 C22.8 68.2 21.8 69.8 23 71.4
+               L26 74.4 L45.5 80.6 Z" fill="#171A20" opacity=".70"/>
+      <path d="M111.5 79.2 L133 68.9 C135.2 68.2 136.2 69.8 135 71.4
+               L132 74.4 L112.5 80.6 Z" fill="#171A20" opacity=".70"/>
+      <path class="lamp" fill="none" stroke-width="1.5" stroke-linecap="round"
+            d="M45.9 78.6 L25.8 69.4"/>
+      <path class="lamp" fill="none" stroke-width="1.5" stroke-linecap="round"
+            d="M112.1 78.6 L132.2 69.4"/>
+
+      <!-- Tesla wordmark on the bonnet -->
+      <path d="M76 73.5 h6 M79 73.5 v3.2" stroke="#171A20" stroke-opacity=".22"
+            stroke-width="1" stroke-linecap="round"/>
+
+      <!-- tyres, kept inside the silhouette so they don't read as feet -->
+      <rect x="22" y="105" width="13" height="5.4" rx="1.6" fill="#171A20" opacity=".45"/>
+      <rect x="123" y="105" width="13" height="5.4" rx="1.6" fill="#171A20" opacity=".45"/>
+
+      <!-- corner air curtains -->
+      <path d="M24 90 L28 90 L27.2 102 L23 102 Z" fill="#171A20" opacity=".12"/>
+      <path d="M134 90 L130 90 L130.8 102 L135 102 Z" fill="#171A20" opacity=".12"/>
+
+      <!-- lower intake, kept well clear of the lamps -->
+      <rect x="40" y="96" width="78" height="4.6" rx="2.3" fill="#171A20" opacity=".38"/>
+    </g>`;
+}
+
+/* ── Cybercab, front elevation ──
+   Traced from a three-quarter front render, reduced to a straight-on
+   elevation. Same 170×130 stage as the Model 3 so nothing in the row layout
+   changes, and every coordinate pair mirrors about x=79.
+
+   What the reference actually shows, and what therefore drives this drawing:
+
+     · a single very thin light bar across the full width of the nose, set
+       HIGH — right under the leading edge of the bonnet, not mid-fascia;
+     · a substantial BLACK LOWER FASCIA with a wide intake slot, occupying
+       the bottom of the car. This is the most prominent feature after the
+       light bar and the easiest one to leave out by mistake;
+     · one continuous pebble-like curve from rocker to roof, domed rather
+       than the Model 3's flat roof section between the A-pillars;
+     · an enormous tinted windscreen running almost to the roof peak;
+     · flush disc wheel covers;
+     · no door mirrors whatsoever. The surface is completely clean, and
+       reading that absence is most of what distinguishes the silhouette.
+
+   Drawn back-to-front so each layer occludes the one behind: body, then
+   creases, glass, light bar, wheels, and the black fascia over the lot.  */
+function carCybercab(){
+  return `
+    <g>
+      <!-- body: low and wide. The first pass domed the roof straight off the
+           rocker and rendered as a helmet — a car needs a distinct shoulder
+           line with the glasshouse sitting ON it, not a single arch. Width to
+           height here is 1.58, against the Model 3's 1.46: lower and wider,
+           which is the proportion the reference actually has. -->
+      <path class="car-body" d="
+        M20 110
+        C18.4 103 17.8 92 18 83
+        C18.4 74 21 68 26.5 64
+        C29 62 32 59.5 35.5 56.5
+        C38 46 50 35.5 63 34.5
+        L95 34.5
+        C108 35.5 120 46 122.5 56.5
+        C126 59.5 129 62 131.5 64
+        C137 68 139.6 74 140 83
+        C140.2 92 139.6 103 138 110
+        Z"/>
+
+      <!-- windscreen: large and softly domed, but seated between the pillars
+           rather than swallowing the whole upper body -->
+      <path d="M37.5 56 C40.5 46 50.5 38 63 36.5 L95 36.5 C107.5 38 117.5 46 120.5 56 Z"
+            fill="#171A20" opacity=".58"/>
+
+      <!-- soft bonnet creases falling away towards the ends of the light bar -->
+      <path d="M31 63 C33.5 59.5 37 57 42 55.5" fill="none"
+            stroke="#171A20" stroke-opacity=".10" stroke-width="1.2" stroke-linecap="round"/>
+      <path d="M127 63 C124.5 59.5 121 57 116 55.5" fill="none"
+            stroke="#171A20" stroke-opacity=".10" stroke-width="1.2" stroke-linecap="round"/>
+
+      <!-- full-width light bar, thin and set high, right under the bonnet
+           edge. Recess first so the strip reads as inset; the strip is a
+           .lamp so it tints with charge state. -->
+      <rect x="26" y="69.5" width="106" height="5" rx="2.5" fill="#171A20" opacity=".55"/>
+      <path class="lamp" fill="none" stroke-width="2.6" stroke-linecap="round"
+            d="M29.5 72 H128.5"/>
+
+      <!-- Tesla wordmark on the otherwise clean fascia -->
+      <path d="M75.5 81 h7 M79 81 v3.2" stroke="#171A20" stroke-opacity=".20"
+            stroke-width="1" stroke-linecap="round"/>
+
+      <!-- flush disc wheels, drawn before the bumper so it overlaps them and
+           only the tyre bottoms show past the corners -->
+      <rect x="21"  y="102" width="13" height="8" rx="2.4" fill="#171A20" opacity=".48"/>
+      <rect x="124" y="102" width="13" height="8" rx="2.4" fill="#171A20" opacity=".48"/>
+
+      <!-- black lower fascia — after the light bar, the feature that most
+           identifies this front end, and the easiest one to omit.
+           Run nearly the full width with a small corner radius: pulled in and
+           heavily rounded it read as a bar floating in front of the car
+           rather than part of it. -->
+      <rect x="21" y="92" width="116" height="16" rx="5" fill="#171A20" opacity=".76"/>
+      <rect x="38" y="96.5" width="82" height="4.8" rx="2.4" fill="#000" opacity=".42"/>
+    </g>`;
+}
+
+function scene(v){
+  // "stalled" still shows the post and the connected cable — the car is
+  // presumed plugged in, it just isn't gaining — but the whole group is
+  // desaturated so it reads as inactive at a glance.
+  const stalled     = v.status === "stalled";
+  const showCharger = v.status === "charging" || v.status === "complete" || stalled;
+  // A finished car normally shows the cable stowed — that IS the "go ahead
+  // and move it" signal. A latched one keeps the cable connected, because it
+  // hasn't been moved and the picture should say so.
+  const plugged     = v.status === "charging" || stalled || isLatched(v);
+
+  const cable = plugged
+    ? "M128 56 C121 66 114 74 106 82"          // running behind the car
+    : "M128 56 C123 68 132 76 129 88";         // stowed against the post
+
+  return `
+  <svg class="scene" viewBox="0 0 170 130" aria-hidden="true">
+    <!-- ground -->
+    <ellipse cx="79" cy="113" rx="64" ry="5" fill="#171A20" opacity=".10"/>
+
+    <!-- Supercharger post (behind) -->
+    <g class="sc${stalled ? " sc-dim" : ""}" opacity="${showCharger ? 1 : 0}" style="transition:opacity .45s">
+      <rect x="120" y="107" width="36" height="7" rx="3" fill="#C9CBCD"/>
+      <rect x="128" y="12" width="20" height="98" rx="10" fill="#F0F1F2" stroke="#D2D4D6" stroke-width="1"/>
+      <rect class="sc-cap" x="128" y="12" width="20" height="15" rx="10"/>
+      <!-- Tesla "T" — drawn in whatever is legible on the accent, so it stays
+           readable when the post turns yellow in engineering. -->
+      <path class="sc-t" d="M133 19.5 h10 M138 19.5 v5.5" stroke-width="1.6" stroke-linecap="round"/>
+      <rect x="132.5" y="34" width="11" height="17" rx="2.5" fill="#171A20" opacity=".82"/>
+      <rect x="134" y="37" width="8" height="2" rx="1" fill="${plugged ? "#3DDC84" : "#6E7276"}"/>
+      <rect x="134" y="41" width="6" height="1.6" rx=".8" fill="#6E7276" opacity=".7"/>
+      <!-- cable -->
+      <path d="${cable}" fill="none" stroke="#171A20" stroke-opacity=".72"
+            stroke-width="3.4" stroke-linecap="round" style="transition:d .4s"/>
+      <circle cx="${plugged ? 106 : 129}" cy="${plugged ? 82 : 88}" r="3.6" fill="#171A20" opacity=".8"/>
+    </g>
+
+    ${isEng() ? carCybercab() : carModel3()}
+  </svg>`;
+}
+
+/* ───────────────────────────── Rendering ───────────────────────────── */
+const STATUS_LABEL = {
+  pending :"Awaiting data",
+  stalled :"Charge idle",
+  charging:"Charging",
+  complete:"Charge complete",
+  error   :"Data unavailable"
+};
+
+/* Display order:
+     1. Vehicles still climbing, highest USOE first — the ones closest to
+        done sit at the top where they're worth watching.
+     2. Anything at or past the charge limit sinks to the bottom; it needs
+        no attention beyond being collected.
+   A copy is sorted so the stored order (and therefore add order) is left
+   alone. Vehicles with no reading yet sit below those with one. */
+const atLimit = v => v.status === "complete" ||
+                     (v.usoe != null && v.usoe >= settings.chargeLimit);
+
+function displayOrder(){
+  return vehicles.slice().sort((a, b) => {
+    // Finished-but-still-plugged-in vehicles lead, ahead of even the ones
+    // still climbing. They are the only rows that need a person to physically
+    // go and do something, so the rule below — that anything at its limit
+    // needs no attention — is exactly wrong for them.
+    //
+    // needsUnplug, not isLatched: every charging car is latched, so the raw
+    // fact would have floated the entire charging fleet to the top and
+    // undone the highest-first ordering underneath.
+    const alatch = needsUnplug(a), blatch = needsUnplug(b);
+    if(alatch !== blatch) return alatch ? -1 : 1;
+
+    const al = atLimit(a), bl = atLimit(b);
+    if(al !== bl) return al ? 1 : -1;
+
+    if(a.usoe == null && b.usoe == null) return a.addedAt - b.addedAt;
+    if(a.usoe == null) return 1;
+    if(b.usoe == null) return -1;
+    if(b.usoe !== a.usoe) return b.usoe - a.usoe;
+
+    return a.addedAt - b.addedAt;   // stable tiebreak
+  });
+}
+
+function rowHtml(v){
+    const limit  = settings.chargeLimit;
+    const filled = v.usoe == null ? 0 : Math.min(100, v.usoe);
+    const gained = (v.usoe != null && v.prevUsoe != null) ? v.usoe - v.prevUsoe : 0;
+
+    let foot;
+    if(needsUnplug(v)){
+      // A latched vehicle never auto-removes, so a countdown would be a lie.
+      // It reports the reminder state instead.
+      foot = v.latchPaused
+        ? "Still latched — proximity unreadable, reminders paused"
+        : v.latchReminders
+          ? `Still latched — ${v.latchReminders} reminder${v.latchReminders === 1 ? "" : "s"} sent`
+          : (() => {
+              const left = Math.max(0, Math.max(1, settings.latchAfter) - (v.latchTicks || 0));
+              return `Still latched — reminder in ${left} cycle${left === 1 ? "" : "s"}`;
+            })();
+    }else if(v.status === "complete"){
+      if(settings.autoClear){
+        const left = REMOVE_AFTER_TICKS - v.ticksSinceComplete;
+        foot = left > 0
+          ? `Auto-removing in ${left} interval${left === 1 ? "" : "s"}`
+          : "Removing…";
+      }else{
+        foot = "Ready to move";
+      }
+    }else if(v.status === "stalled" && isLatched(v)){
+      // Measured, not timed out — the connector is in and no power is moving.
+      foot = "Plugged in, not drawing power";
+    }else if(v.status === "charging" && v.packAmps != null && v.packAmps > MIN_CHARGE_AMPS){
+      // Shown because it is the evidence the state is based on, and because
+      // seeing the real number is how you tell MIN_CHARGE_AMPS is sane.
+      foot = `Drawing ${Math.round(v.packAmps)} A`;
+    }else if(parseGarageTime(v.readingAt)){
+      // Garage snapshots are event-driven, so the age of the reading itself
+      // matters more than when we last polled for it.
+      foot = "Vehicle reported " + relTime(parseGarageTime(v.readingAt));
+    }else if(v.lastUpdate){
+      foot = "Updated " + relTime(v.lastUpdate);
+    }else{
+      foot = "Queued for next refresh";
+    }
+
+    return `
+    <div class="veh ${v.status}" data-vin="${v.vin}">
+      ${scene(v)}
+
+      <div class="veh-id">
+        <div class="vin" title="${v.vin}">${v.vin}</div>
+        <div class="veh-sub">
+          <span class="badge"><span class="dot"></span>${STATUS_LABEL[v.status]}</span>
+          ${needsUnplug(v) ? `<span class="badge latched${v.latchPaused ? " stale" : ""}" title="${
+              v.latchPaused
+                ? "Last seen latched, but proximity has been unreadable since — reminders paused"
+                : "Charge complete and still connected to the Supercharger"
+            }"><span class="dot"></span>Latched</span>` : ""}
+          ${isOffsite(v) ? `<span class="badge geo" title="${
+              v.facility ? "At " + v.facility + " (TRT " + v.trtId + ")"
+                         : "No Tesla facility geofence"
+            } — home is TRT ${settings.mainTrt}">Offsite</span>` : ""}
+          <span>Target ${pct(limit)}%</span>
+        </div>
+      </div>
+
+      <div class="readout">
+        <div class="usoe ${v.usoe == null ? "dim" : ""}">${pct(v.usoe)}<small>%</small></div>
+        <div class="delta" ${gained > 0.049 ? "" : "hidden"}>+${gained.toFixed(1)} since last</div>
+        <div class="bar">
+          <div class="bar-fill" style="width:${filled}%"></div>
+          <div class="bar-limit" style="left:calc(${Math.min(100, limit)}% - 1px)"></div>
+        </div>
+        <div class="readout-foot">${foot}</div>
+      </div>
+
+      <button class="btn-x" data-remove="${v.vin}" title="Stop monitoring">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>`;
+}
+
+/* Collapsible bundle for finished vehicles, used when auto-clear is off. */
+function doneGroupHtml(done){
+  if(!done.length) return "";
+  return `
+  <div class="done-group ${settings.doneCollapsed ? "" : "open"}">
+    <button class="done-head" id="doneToggle">
+      <svg class="done-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+      <span class="done-title">Fully charged</span>
+      <span class="done-count">${done.length}</span>
+      <span class="done-spacer"></span>
+      <span class="done-clear" id="doneClear">Clear all</span>
+    </button>
+    <div class="done-body">${done.map(rowHtml).join("")}</div>
+  </div>`;
+}
+
+/* ── Stat-strip filters ────────────────────────────────────────────────
+   Clicking a counting cell narrows the list to that set; clicking Monitored,
+   or the active cell again, returns to everything. Deliberately not
+   persisted — a filter surviving a reload would look like lost vehicles. */
+let filter = "all";
+
+const FILTER_TEST = {
+  all     : () => true,
+  charging: v => v.status === "charging",
+  complete: v => v.status === "complete",
+  offsite : v => isOffsite(v)
+};
+
+const FILTER_EMPTY = {
+  charging: "None charging",
+  complete: "None complete",
+  offsite : "None offsite"
+};
+
+const matchesFilter = v => (FILTER_TEST[filter] || FILTER_TEST.all)(v);
+
+function render(){
+  const list  = $("list");
+  const empty = $("empty");
+  empty.hidden = vehicles.length > 0;
+
+  const ordered  = displayOrder();
+  const filtered = ordered.filter(matchesFilter);
+
+  // "Nothing matched" and "nothing monitored" are different states and must
+  // not look alike.
+  const fe = $("filterEmpty");
+  fe.hidden = !(vehicles.length > 0 && filtered.length === 0);
+  if(!fe.hidden) fe.textContent = FILTER_EMPTY[filter] || "Nothing to show";
+
+  if(filter !== "all"){
+    // A filtered view is always flat — the collapsible "Fully charged" group
+    // only makes sense when the whole list is on screen.
+    list.innerHTML = filtered.map(rowHtml).join("");
+  }else if(settings.autoClear){
+    // Finished vehicles sink to the bottom and age out on their own.
+    list.innerHTML = filtered.map(rowHtml).join("");
+  }else{
+    // Finished vehicles are parked in a collapsible group instead.
+    const done   = filtered.filter(atLimit);
+    const active = filtered.filter(v => !atLimit(v));
+    list.innerHTML = active.map(rowHtml).join("") + doneGroupHtml(done);
+  }
+
+  // Status colours are applied here rather than in CSS so the pulse
+  // keyframes and the flat fills stay in one place.
+  list.querySelectorAll(".veh").forEach(row => {
+    const st   = row.classList.contains("charging") ? "charging"
+               : row.classList.contains("complete") ? "complete" : "pending";
+    const body = row.querySelector(".car-body");
+    const lamps = row.querySelectorAll(".lamp");
+    // The lamps are a stroked LED signature, so they tint via stroke.
+    if(st === "charging"){
+      body.setAttribute("fill", "var(--amber)");
+      body.style.animation = "pulseCharge 1.6s ease-in-out infinite";
+      lamps.forEach(l => l.setAttribute("stroke", "#FFF1CC"));
+    }else if(st === "complete"){
+      body.setAttribute("fill", "var(--green)");
+      body.style.animation = "";
+      lamps.forEach(l => l.setAttribute("stroke", "#DFFBEC"));
+    }else{
+      body.setAttribute("fill", "var(--grey-car)");
+      body.style.animation = "";
+      lamps.forEach(l => l.setAttribute("stroke", "#F0F1F2"));
+    }
+  });
+
+  renderStats();
+}
+
+function renderStats(){
+  $("sMon").textContent = vehicles.length;
+  $("sChg").textContent = vehicles.filter(v => v.status === "charging").length;
+  $("sCom").textContent = vehicles.filter(v => v.status === "complete").length;
+  $("sOff").textContent = vehicles.filter(isOffsite).length;
+
+  document.querySelectorAll(".strip .stat[data-filter]").forEach(cell =>
+    cell.classList.toggle("on", cell.dataset.filter === filter));
+
+  $("sLim").innerHTML   = pct(settings.chargeLimit) + "<small>%</small>";
+  $("fMode").textContent = settings.source === "live" ? "Live endpoint" : "Simulation mode";
+  $("refreshBtn").disabled = vehicles.length === 0 || busy;
+  renderNextStat();
+}
+
+/* ───────────────────────────── Teams alerts ─────────────────────────────
+   The proxy decides how this is delivered — a Power Automate webhook, or an
+   email handed to the local Outlook client for a flow to pick up. There is no
+   UI here for either; both are configured server-side. See "Microsoft Teams
+   alerts" in the README.
+
+   Fire-and-forget: a failure here must never disrupt a monitoring sweep. */
+function pushTeamsAlert(v, usoe){
+  if(!SERVED) return;
+  fetch("/api/notify", {
+    method : "POST",
+    headers: { "Content-Type": "application/json" },
+    body   : JSON.stringify({
+      event    : "charge_complete",
+      vin      : v.vin,
+      usoe     : Number(usoe.toFixed(1)),
+      limit    : settings.chargeLimit,
+      readingAt: v.readingAt || null
+    })
+  })
+  .then(r => r.json())
+  .then(d => { if(d && d.error) notify("error", `Teams alert failed for <b>${v.vin}</b> — ${d.error}`); })
+  .catch(() => { /* proxy unreachable; the audit log already has the completion */ });
+}
+
+/* ───────────────────────────── Charge-port latch ─────────────────────────
+   Runs every sweep for a vehicle that has reached its target. Three inputs,
+   and the distinction between them is the whole design:
+
+     DISCONNECTED  a fact — the connector is out. Ends monitoring.
+     LATCHED       a fact — still occupying the stall. Drives the reminders.
+     null          not a fact. Live read is off, or the car is asleep and the
+                   live endpoint answered 408. Changes nothing.            */
+let latchWarned = false;   // the "needs live read" notice fires once per load
+
+function handleLatch(v, usoe, justFinished){
+
+  if(v.proximity === "DISCONNECTED"){
+    // Only meaningful for a vehicle we actually saw latched. A completion
+    // that was never latched just ages out the ordinary way.
+    if(v.latchTicks > 0){
+      v.latchTicks  = 0;
+      v.latchPaused = false;
+      v.unplugged   = true;      // the sweep removes it once every result is in
+    }
+    return;
+  }
+
+  // Never read, or read as something other than latched.
+  if(!isLatched(v)){
+    // Live read off means proximity is not merely stale, it is unavailable —
+    // the cached vitals set has no CP_* columns. Say so once, rather than
+    // letting the whole feature look broken.
+    if(v.proximity == null && settings.source === "live" && !liveState.ready && !latchWarned){
+      latchWarned = true;
+      notify("info",
+        "Latch detection needs <b>live read</b> — charge-port proximity only exists in the live " +
+        "vitals dump, not in Garage's cached snapshots. Turn it on in Admin → Live vitals.");
+    }
+    return;
+  }
+
+  // Latched — but is that still an observation, or just the last thing we
+  // happened to see? v.proximity holds its previous value through an
+  // unreadable sweep, which is what keeps the tag on screen while a car
+  // sleeps. It must NOT also keep the reminders firing: a vehicle unplugged
+  // while asleep would otherwise be nagged about forever on a reading that
+  // stopped being true hours ago.
+  //
+  // This check has to come BEFORE the confirmed-latched branch below. It
+  // originally lived in the not-latched branch above, where it could never
+  // run at all while the held value was LATCHED — caught by the asleep-car
+  // scenario, which fired three reminders it should not have.
+  if((v.proxUnknown || 0) >= LATCH_STALE_CYCLES){
+    if(!v.latchPaused){
+      v.latchPaused = true;
+      notify("info",
+        `<b>${v.vin}</b> was latched, but proximity has been unreadable for ` +
+        `${LATCH_STALE_CYCLES} cycles — reminders paused until it can be confirmed. ` +
+        (liveState.ready ? "The vehicle is probably asleep."
+                         : "Live read is off, so proximity cannot be read at all."));
+    }
+    return;
+  }
+
+  // Latched, confirmed recently enough to act on.
+  v.latchPaused = false;
+  v.latchTicks  = (v.latchTicks || 0) + 1;
+
+  if(v.latchTicks === 1){
+    notify("error", justFinished
+      ? `<b>${v.vin}</b> finished charging and is still latched to the Supercharger`
+      : `<b>${v.vin}</b> is already charged and still latched to the Supercharger`);
+  }
+
+  // First reminder after `latchAfter` latched cycles, then every `latchEvery`
+  // after that, until the connector comes out.
+  const since = v.latchTicks - Math.max(1, settings.latchAfter);
+  if(since < 0) return;
+
+  const every = Math.max(0, settings.latchEvery);
+  // Guarded rather than relying on modulo: `every` of 0 means "one reminder,
+  // no repeats", and `since % 0` is NaN, which would silently never fire.
+  if(every === 0 ? since === 0 : since % every === 0) pushLatchAlert(v, usoe);
+}
+
+/* The red "still plugged in" card. reminderIndex rides along so the proxy can
+   dedupe a page-refresh resend without swallowing genuine repeats. */
+function pushLatchAlert(v, usoe){
+  if(!SERVED) return;
+
+  const index   = (v.latchReminders = (v.latchReminders || 0) + 1);
+  const minutes = v.completedAt ? (Date.now() - v.completedAt) / 60000 : null;
+
+  fetch("/api/notify", {
+    method : "POST",
+    headers: { "Content-Type": "application/json" },
+    body   : JSON.stringify({
+      event        : "still_latched",
+      vin          : v.vin,
+      usoe         : Number(usoe.toFixed(1)),
+      limit        : settings.chargeLimit,
+      readingAt    : v.readingAt || null,
+      reminderIndex: index,
+      minutes
+    })
+  })
+  .then(r => r.json())
+  .then(d => {
+    if(d && d.error){
+      notify("error", `Latch reminder failed for <b>${v.vin}</b> — ${d.error}`);
+    }else if(d && d.sent){
+      notify("error", `Latch reminder ${index} sent — <b>${v.vin}</b> still plugged in`);
+    }
+    // sent:false with a reason (alerts not configured, duplicate) is not
+    // worth a log line every couple of minutes.
+  })
+  .catch(() => { /* proxy unreachable; the row already shows the latch */ });
+}
+
+/* ── Live read state ───────────────────────────────────────────────────
+   A mirror of the proxy's view. The proxy enforces the real gate — if this
+   ever disagrees, the proxy wins and quietly serves cached data. */
+let liveState = { configured:false, enabled:false, ready:false, lastError:null };
+
+async function loadLiveStatus(){
+  if(!SERVED){
+    liveState = { configured:false, enabled:false, ready:false, lastError:null };
+    return liveState;
+  }
+  const was = liveState.ready;
+
+  try{ liveState = await (await fetch("/api/live")).json(); }
+  catch{ return liveState; }   // proxy unreachable — keep the last known state
+
+  // The proxy switches live read off by itself when the cookie is rejected,
+  // either on a real read or on the scheduled health check. This is the one
+  // place that transition is announced, so it fires exactly once however it
+  // was discovered.
+  if(was && !liveState.ready && liveState.lastError){
+    notify("error",
+      `<b>Garage cookie needs a refresh.</b> ${escHtml(liveState.lastError)} ` +
+      `Live read is off and everything has fallen back to cached snapshots — ` +
+      `paste a fresh cookie in Admin → Live vitals.`);
+  }
+
+  updateLiveBubble();
+  return liveState;
+}
+
+/* ── Live activity indicator ───────────────────────────────────────────
+   Three states, and the distinction that matters is the middle one: a cookie
+   can be saved and enabled while nothing has actually succeeded yet, which is
+   not the same as working. Green only ever means "something worked recently". */
+const LIVE_FRESH_MS = 20 * 60 * 1000;   // a touch over the 15-min check interval
+
+function updateLiveBubble(){
+  const box = $("liveBubble");
+  if(!box) return;
+
+  const txt = $("liveBubbleText"), sub = $("liveBubbleSub");
+  const dot = $("railWarnLive");
+
+  const recent = Math.max(liveState.lastOk || 0, liveState.lastRead || 0);
+  const fresh  = recent > 0 && (Date.now() - recent) < LIVE_FRESH_MS;
+
+  box.classList.remove("on", "bad");
+
+  if(liveState.lastError){
+    box.classList.add("bad");
+    txt.textContent = "Needs refresh";
+    sub.textContent = "cookie rejected";
+    if(dot){ dot.hidden = false; dot.classList.remove("ok"); }
+
+  }else if(liveState.ready && fresh){
+    box.classList.add("on");
+    txt.textContent = "Live";
+    sub.textContent = liveState.lastRead && Date.now() - liveState.lastRead < LIVE_FRESH_MS
+      ? `reading vehicles · verified ${relTime(recent)}`
+      : `cookie verified ${relTime(recent)}`;
+    if(dot){ dot.hidden = false; dot.classList.add("ok"); }
+
+  }else if(liveState.ready){
+    // Enabled, but nothing has come back yet — first sweep pending, or every
+    // vehicle is asleep. Not a fault, but not proof of life either.
+    box.classList.add("on");
+    txt.textContent = "Armed";
+    sub.textContent = "waiting for a successful read";
+    if(dot){ dot.hidden = false; dot.classList.add("ok"); }
+
+  }else{
+    txt.textContent = liveState.configured ? "Off" : "Not configured";
+    sub.textContent = liveState.configured ? "cookie saved, live read disabled" : "";
+    if(dot){ dot.hidden = true; dot.classList.remove("ok"); }
+  }
+}
+
+/* A light poll so the indicator and the expiry notice do not depend on a
+   monitoring sweep happening — with an empty list, tick() returns early and
+   would never notice the cookie had died. Cheap: localhost, small JSON, and
+   the proxy only re-probes Garage every COOKIE_CHECK_MS regardless. */
+setInterval(() => { if(SERVED) loadLiveStatus(); }, 90_000);
+
+/* ───────────────────────────── Monitoring engine ───────────────────────────── */
+let busy = false;
+const sweep = { done: 0, total: 0 };   // live progress for the stat strip
+let overrunWarned = false;             // so the overrun notice fires only once
+
+function addVins(raw){
+  const parts = raw.split(/[\s,;]+/).filter(Boolean);
+  if(!parts.length) return {added:0, errors:["Enter at least one VIN."]};
+
+  const errors = [];
+  let added = 0;
+
+  for(const part of parts){
+    const check = validateVin(part);
+    if(!check.ok){ errors.push(check.err); continue; }
+    if(vehicles.some(v => v.vin === check.vin)){
+      errors.push(`${check.vin} is already being monitored.`);
+      continue;
+    }
+    vehicles.push({
+      vin: check.vin,
+      status: "pending",
+      usoe: null,
+      prevUsoe: null,
+      addedAt: Date.now(),
+      lastUpdate: null,
+      everCharged: false,
+      ticksSinceComplete: 0,
+      stallTicks: 0,
+
+      // Charge-port latch. null means "not yet read", which is distinct from
+      // DISCONNECTED — see the latch section for why that matters.
+      proximity: null,
+      proxAt: null,
+      proxUnknown: 0,
+      packAmps: null,
+      latchTicks: 0,
+      latchReminders: 0,
+      latchPaused: false,
+      completedAt: null
+    });
+    notify("info", `<b>${check.vin}</b> added to monitoring list`);
+    added++;
+  }
+
+  if(added){ save(KEY.veh, vehicles); render(); }
+  return {added, errors};
+}
+
+function removeVin(vin, reason){
+  const i = vehicles.findIndex(v => v.vin === vin);
+  if(i === -1) return;
+  vehicles.splice(i, 1);
+  delete simState[vin];
+  save(KEY.veh, vehicles); save(KEY.sim, simState);
+  notify("info", `<b>${vin}</b> removed from monitoring list${reason ? ` (${reason})` : ""}`);
+  render();
+}
+
+/* Animate the row out, then drop it from state. */
+function removeVinAnimated(vin, reason){
+  const row = document.querySelector(`.veh[data-vin="${vin}"]`);
+  if(!row){ removeVin(vin, reason); return; }
+  row.classList.add("leaving");
+  setTimeout(() => removeVin(vin, reason), 400);
+}
+
+async function tick(){
+  if(!vehicles.length) return;
+
+  if(busy){
+    // A large list on a short interval can take longer to sweep than the
+    // interval itself. Skip rather than pile up, and say so exactly once.
+    if(!overrunWarned){
+      overrunWarned = true;
+      notify("error", `Refresh skipped — the previous sweep of ${sweep.total} vehicles is still running. Increase the refresh interval in Admin.`);
+    }
+    return;
+  }
+  overrunWarned = false;
+
+  busy = true;
+  renderStats();
+
+  // Re-read each sweep so an expired cookie — which the proxy detects and
+  // switches off on its own — stops being requested straight away.
+  // loadLiveStatus() owns announcing that transition, so it is reported once
+  // whether it was found here, by the 90s poll, or by the proxy's own check.
+  await loadLiveStatus();
+
+  // 1. Age out anything that already finished — only when auto-clear is on.
+  //    With it off, completed vehicles stay put in the collapsed group.
+  //
+  //    A latched vehicle is exempt either way. It has finished charging but
+  //    is still occupying the stall, which is exactly the thing worth keeping
+  //    on screen; it leaves the list when the connector comes out, not on a
+  //    timer.
+  const expiring = [];
+  for(const v of vehicles){
+    if(v.status !== "complete") continue;
+    v.ticksSinceComplete++;
+    if(settings.autoClear && !isLatched(v) && v.ticksSinceComplete >= REMOVE_AFTER_TICKS){
+      expiring.push(v.vin);
+    }
+  }
+
+  // 2. Poll everything still charging — plus anything finished but latched,
+  //    because the only way to learn it has been unplugged is to keep asking.
+  const active = vehicles.filter(v => v.status !== "complete" || isLatched(v));
+
+  sweep.total = active.length;
+  sweep.done  = 0;
+
+  await runPooled(active, async v => {
+    try{
+      // With live read on, every monitored vehicle gets a real-time read.
+      // A live response is ~140 KB, so a large list is genuinely heavy —
+      // deliberately accepted, because these lists are normally small and
+      // partial freshness was more confusing than it was worth.
+      const reading = await fetchUsoe(v.vin, liveState.ready);
+      const usoe    = reading.usoe;
+      v.prevUsoe    = v.usoe;
+      v.usoe        = usoe;
+      v.readingAt   = reading.readingAt;
+      v.live        = Boolean(reading.live);
+      v.lastUpdate  = Date.now();
+
+      // Proximity: only a real reading moves it. An unknown leaves the last
+      // known value in place and counts against the staleness budget.
+      if(reading.proximity){
+        v.proximity  = reading.proximity;
+        v.proxAt     = Date.now();
+        v.proxUnknown = 0;
+      }else{
+        v.proxUnknown = (v.proxUnknown || 0) + 1;
+      }
+      // Current is NOT held over the way proximity is. A stale amp reading
+      // would assert "still drawing power" about a moment that has passed;
+      // proximity survives because a connector does not unplug itself.
+      v.packAmps = reading.packAmps ?? null;
+
+      // Charging is only ever claimed on a real rise. A falling reading means
+      // the vehicle is being driven or the pack is settling — never charging,
+      // so it falls through to the idle handling alongside a flat reading.
+      const delta  = v.prevUsoe == null ? null : usoe - v.prevUsoe;
+      const rising = delta != null && delta >= MIN_RISE;
+
+      // true / false when the charge port could be read, null when it could
+      // not — null is what selects the inference path below.
+      const charging = isCharging(v, rising);
+
+      if(usoe >= settings.chargeLimit){
+        // A card should mark a vehicle *crossing* the limit, not merely being
+        // found above it. On a VIN's very first reading prevUsoe is still
+        // null, so there is no crossing to report — add a full list of cars
+        // that are already charged and the chat would otherwise be flooded.
+        // It is still marked complete; only the Teams alert is withheld.
+        // Loose null check, matching the charging test below: a vehicle
+        // persisted before this field existed reads undefined, and treating
+        // that as a baseline errs toward silence rather than a stray card.
+        const baseline = v.prevUsoe == null;
+
+        // Completed vehicles are polled again once they are latched, so this
+        // branch is now re-entered every cycle for them. Only the TRANSITION
+        // into complete may announce itself — without this guard a latched
+        // car would post a fresh "finished charging" card on every sweep.
+        const justFinished = v.status !== "complete";
+
+        v.status = "complete";
+        if(justFinished){
+          v.completedAt = Date.now();
+          v.ticksSinceComplete = 0;
+          v.latchTicks     = 0;
+          v.latchReminders = 0;
+          v.latchPaused    = false;
+
+          if(baseline){
+            notify("info", `<b>${v.vin}</b> was already at ${pct(usoe)}% when added — no card sent`);
+          }else{
+            notify("success", `<b>${v.vin}</b> finished charging at ${pct(usoe)}%`);
+            pushTeamsAlert(v, usoe);
+          }
+        }
+        handleLatch(v, usoe, justFinished);
+
+      }else if(charging !== null){
+        /* ── Measured path ──────────────────────────────────────────────
+           Live read gave us a charge-port reading, so the state is observed
+           rather than deduced from two samples. Three consequences worth
+           knowing:
+
+             · charging is known on the FIRST reading, with no baseline to
+               establish first;
+             · MIN_RISE and the float wobble it exists to absorb are simply
+               not consulted, so an idle car cannot announce itself;
+             · "plugged in but not gaining" is a real, distinguishable state
+               instead of a timeout. It does NOT decay to "awaiting data"
+               after a few cycles, because being plugged in is a fact we can
+               see — the absence of a charge-level rise is not an absence of
+               information here.                                            */
+        if(charging){
+          if(!v.everCharged){
+            v.everCharged = true;
+            notify("charge", `<b>${v.vin}</b> started charging`);
+          }
+          v.status     = "charging";
+          v.stallTicks = 0;
+        }else if(isLatched(v)){
+          v.status     = "stalled";      // connected, not drawing
+          v.stallTicks = 0;
+        }else{
+          v.status      = "pending";     // nothing plugged in
+          v.stallTicks  = 0;
+          v.everCharged = false;         // so a re-plug announces itself
+        }
+
+      }else if(rising){
+        /* ── Inference path ─────────────────────────────────────────────
+           No proximity reading: live read is off, or the vehicle is asleep
+           and the live endpoint answered 408. Unchanged from before — a rise
+           of at least MIN_RISE is the only evidence available. */
+        if(!v.everCharged){
+          v.everCharged = true;
+          notify("charge", `<b>${v.vin}</b> started charging`);
+        }
+        v.status     = "charging";
+        v.stallTicks = 0;
+      }else if(v.status === "charging" || v.status === "stalled"){
+        // No measurable gain this cycle. Leave the amber charging state at
+        // once — the Supercharger stays drawn but greys out — and after
+        // STALL_TO_PENDING flat cycles stop treating it as plugged in.
+        v.stallTicks = (v.stallTicks || 0) + 1;
+
+        if(v.stallTicks >= STALL_TO_PENDING){
+          v.status      = "pending";
+          v.stallTicks  = 0;
+          v.everCharged = false;   // so a later resume announces itself again
+          notify("info", `<b>${v.vin}</b> hasn't gained charge in ${STALL_TO_PENDING} cycles — back to awaiting data`);
+        }else{
+          v.status = "stalled";
+        }
+      }else{
+        v.status = "pending";
+      }
+    }catch(err){
+      v.status = "error";
+      // An auth failure hits every vehicle at once and the banner already
+      // says so — don't flood the audit log with one entry per VIN.
+      if(!err.needsAuth) notify("error", `<b>${v.vin}</b> data fetch failed — ${err.message}`);
+    }
+  }, {
+    concurrency: settings.concurrency,
+    spacingMs  : settings.spacingMs,
+    onProgress : done => { sweep.done = done; scheduleRender(); }
+  });
+
+  // Geofences last: one batched call, and it can't hold up the USOE results.
+  await refreshGeofences();
+
+  // Vehicles confirmed unplugged during this sweep. Collected here rather
+  // than removed inside the worker, because splicing the array a pooled
+  // worker is iterating would drop other vehicles from the same sweep.
+  const unplugged = vehicles.filter(v => v.unplugged).map(v => v.vin);
+  for(const v of vehicles) delete v.unplugged;
+
+  save(KEY.veh, vehicles);
+  busy = false;
+  sweep.total = 0;
+  render();
+
+  // 3. Now retire the expired ones, and anything that has come off the charger.
+  expiring.forEach(vin => removeVinAnimated(vin, "charge complete"));
+  unplugged.forEach(vin => removeVinAnimated(vin, "unplugged from the Supercharger"));
+}
+
+/* ───────────────────────────── Scheduler ───────────────────────────── */
+let timer = null, nextAt = 0;
+
+function schedule(){
+  clearInterval(timer);
+  const ms = settings.intervalSec * 1000;
+  nextAt = Date.now() + ms;
+  timer = setInterval(() => { nextAt = Date.now() + ms; tick(); }, ms);
+}
+
+/* While a sweep runs the countdown is replaced by live progress, so a
+   100-VIN pass doesn't look like a frozen dashboard. */
+function renderNextStat(){
+  if(sweep.total){
+    $("sNextK").textContent = "Polling Garage";
+    $("sNext").innerHTML = `<span style="font-size:17px">${sweep.done}/${sweep.total}</span>`;
+  }else{
+    $("sNextK").textContent = "Next refresh";
+    $("sNext").textContent = vehicles.length ? mmss((nextAt - Date.now())/1000) : "—";
+  }
+}
+
+setInterval(() => {
+  renderNextStat();
+  // keep the "updated Xs ago" strings honest without a full re-render
+  document.querySelectorAll(".veh").forEach(row => {
+    const v = vehicles.find(x => x.vin === row.dataset.vin);
+    if(!v || v.status === "complete" || !v.lastUpdate) return;
+    const foot = row.querySelector(".readout-foot");
+    if(!foot) return;
+    const reported = parseGarageTime(v.readingAt);
+    foot.textContent = reported ? "Vehicle reported " + relTime(reported)
+                                : "Updated " + relTime(v.lastUpdate);
+  });
+}, 1000);
+
+/* ───────────────────────────── Wiring: entry ───────────────────────────── */
+function submitVins(){
+  const {added, errors} = addVins($("vinInput").value);
+  const msg = $("entryMsg");
+
+  if(added && !errors.length){
+    $("vinInput").value = "";
+    msg.className = "entry-msg ok";
+    msg.textContent = `${added} vehicle${added === 1 ? "" : "s"} added. Baseline reading on next refresh.`;
+    tick();                       // establish a baseline immediately
+  }else if(added){
+    $("vinInput").value = "";
+    msg.className = "entry-msg";
+    msg.textContent = `${added} added. ${errors[0]}`;
+    tick();
+  }else{
+    msg.className = "entry-msg";
+    msg.textContent = errors[0] || "Nothing to add.";
+  }
+  setTimeout(() => { if(msg.textContent) msg.textContent = ""; }, 6000);
+}
+
+/* Stat-strip filter buttons. Clicking the active one clears it, so a filter
+   is never a trap you have to hunt for the way out of. */
+document.querySelectorAll(".strip .stat[data-filter]").forEach(cell => {
+  cell.addEventListener("click", () => {
+    const want = cell.dataset.filter;
+    filter = (want === filter && want !== "all") ? "all" : want;
+    render();
+  });
+  cell.addEventListener("keydown", e => {
+    if(e.key === "Enter" || e.key === " "){ e.preventDefault(); cell.click(); }
+  });
+});
+
+$("monitorBtn").addEventListener("click", submitVins);
+$("vinInput").addEventListener("keydown", e => { if(e.key === "Enter") submitVins(); });
+/* Refresh now — confirmed, because it is a real download from Garage.
+
+   The numbers are worth stating rather than warning about: a live read is
+   ~140 KB per vehicle against a few hundred bytes for a cached snapshot, so
+   the same button press costs 700 bytes or 14 MB depending on a setting two
+   panels away in Admin. The dialog does the arithmetic. */
+$("refreshBtn").addEventListener("click", async () => {
+  const due = vehicles.filter(v => v.status !== "complete");
+  if(!due.length) return;
+
+  const live  = Boolean(liveState.ready) && settings.source === "live";
+  const bytes = due.length * (live ? 140 * 1024 : 700);
+
+  const ok = await askConfirm({
+    title: "Refresh now?",
+    text : settings.source === "live"
+      ? `This polls Garage immediately for every vehicle that hasn't finished, ` +
+        `outside the normal schedule.`
+      : `This runs a simulated sweep — no Garage request is made in simulation mode.`,
+    facts: [
+      ["Environment",   ENV_LABEL[envKey]],
+      ["Vehicles",      String(due.length)],
+      ["Reading",       settings.source !== "live" ? "Simulation"
+                        : live ? "Live vitals" : "Cached snapshots"],
+      ["Approx. download", settings.source !== "live" ? "none" : `~${fmtBytes(bytes)}`]
+    ],
+    yes: "Refresh now"
+  });
+  if(!ok) return;
+
+  nextAt = Date.now() + settings.intervalSec * 1000;
+  tick();
+});
+
+function clearCompleted(){
+  const done = vehicles.filter(atLimit).map(v => v.vin);
+  if(!done.length) return;
+  for(const vin of done){
+    const i = vehicles.findIndex(x => x.vin === vin);
+    if(i > -1) vehicles.splice(i, 1);
+    delete simState[vin];
+  }
+  save(KEY.veh, vehicles); save(KEY.sim, simState);
+  notify("info", `${done.length} fully charged vehicle${done.length === 1 ? "" : "s"} removed from monitoring list`);
+  render();
+}
+
+$("list").addEventListener("click", e => {
+  // "Clear all" sits inside the toggle button, so stop it collapsing too.
+  if(e.target.closest("#doneClear")){ e.stopPropagation(); clearCompleted(); return; }
+
+  if(e.target.closest("#doneToggle")){
+    settings.doneCollapsed = !settings.doneCollapsed;
+    save(KEY.set, settings);
+    render();
+    return;
+  }
+
+  const btn = e.target.closest("[data-remove]");
+  if(btn) removeVinAnimated(btn.dataset.remove, "manual");
+});
+
+/* ───────────────────────────── Wiring: overlays ───────────────────────────── */
+const scrim = $("scrim"), panel = $("panel"), modal = $("modal");
+
+/* Freeze the page behind whatever is open. Driven off the actual state of the
+   overlays rather than a counter, so it cannot drift out of sync however they
+   are opened and closed. */
+function syncScrollLock(){
+  // The confirm dialog is read straight off the DOM rather than through
+  // confirmOpen(), which is declared further down — this way the check does
+  // not depend on where in the file it happens to be called from.
+  const open = panel.classList.contains("on")
+            || modal.classList.contains("on")
+            || $("confirm").classList.contains("on");
+
+  if(open === document.body.classList.contains("no-scroll")) return;
+
+  if(open){
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.paddingRight = gap > 0 ? gap + "px" : "";
+    document.body.classList.add("no-scroll");
+  }else{
+    document.body.classList.remove("no-scroll");
+    document.body.style.paddingRight = "";
+  }
+}
+
+function closeAll(){
+  panel.classList.remove("on");
+  modal.classList.remove("on");
+  scrim.classList.remove("on");
+  syncScrollLock();
+}
+
+$("bellBtn").addEventListener("click", () => {
+  panel.classList.add("on"); scrim.classList.add("on");
+  notes.forEach(n => n.read = true);
+  save(KEY.note, notes);
+  renderNotes();
+  syncScrollLock();
+});
+$("panelClose").addEventListener("click", closeAll);
+$("modalClose").addEventListener("click", closeAll);
+scrim.addEventListener("click", closeAll);
+
+/* ───────────────────────────── Confirm dialog ─────────────────────────────
+   A promise-returning replacement for window.confirm, used wherever an
+   action reaches outside the page: a manual sweep that pulls real data from
+   Garage, emptying the list, changing environment.
+
+   It exists because those actions are cheap to trigger and not cheap to
+   perform — a manual refresh with live read on and a full list moves
+   megabytes off Garage, and nothing in a single button click communicated
+   that. So the dialog states the cost in numbers rather than warning in
+   the abstract.
+
+   There is deliberately no "don't ask again": a confirmation that can be
+   switched off stops being a confirmation the moment someone clicks through
+   it once, which is exactly when it would have been worth reading.        */
+const confirmEl = $("confirm"), confirmScrim = $("confirmScrim");
+let confirmResolve = null;
+
+const confirmOpen = () => confirmEl.classList.contains("on");
+
+function closeConfirm(result){
+  if(!confirmResolve) return;
+  const done = confirmResolve;
+  confirmResolve = null;
+  confirmEl.classList.remove("on");
+  confirmScrim.classList.remove("on");
+  syncScrollLock();
+  done(result);
+}
+
+function askConfirm({ title, text, facts = [], yes = "Confirm", no = "Cancel",
+                      danger = false } = {}){
+  // A second dialog on top of the first would strand the first one's promise.
+  if(confirmResolve) closeConfirm(false);
+
+  $("confirmTitle").textContent = title || "Are you sure?";
+  $("confirmText").innerHTML    = text || "";
+
+  const box = $("confirmFacts");
+  box.innerHTML = facts.map(([k, v]) =>
+    `<div class="cf"><span>${escHtml(k)}</span><span>${escHtml(v)}</span></div>`).join("");
+  box.hidden = facts.length === 0;
+
+  const yesBtn = $("confirmYes");
+  yesBtn.textContent = yes;
+  yesBtn.className   = "btn-block " + (danger ? "red" : "solid");
+  $("confirmNo").textContent = no;
+
+  confirmEl.classList.add("on");
+  confirmScrim.classList.add("on");
+  syncScrollLock();
+  setTimeout(() => yesBtn.focus(), 60);
+
+  return new Promise(resolve => { confirmResolve = resolve; });
+}
+
+$("confirmYes").addEventListener("click", () => closeConfirm(true));
+$("confirmNo").addEventListener("click",  () => closeConfirm(false));
+confirmScrim.addEventListener("click",    () => closeConfirm(false));
+
+/* Escape closes the topmost thing only, so dismissing a confirmation does
+   not also throw away the admin panel behind it. */
+document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  if(confirmOpen()){ closeConfirm(false); return; }
+  closeAll();
+});
+
+function fmtBytes(n){
+  if(n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1) + " MB";
+  if(n >= 1024)        return Math.round(n / 1024) + " KB";
+  return Math.round(n) + " B";
+}
+
+/* ───────────────────────────── Environment ─────────────────────────────
+   The proxy owns which Garage is current; this is a mirror of it plus the
+   local half of the switch — storage keys, theme, and the vehicle list.  */
+let envInfo = null;   // last /api/env payload
+
+function applyEnvTheme(){
+  document.body.classList.toggle("env-eng", isEng());
+  $("envChip").textContent = ENV_LABEL[envKey];
+
+  const fEnv = $("fEnv");
+  if(fEnv) fEnv.textContent = ENV_LABEL[envKey] + " Garage";
+
+  const liveName = $("liveEnvName");
+  if(liveName) liveName.textContent = ENV_LABEL[envKey];
+
+  const foot = $("railFoot");
+  if(foot){
+    foot.innerHTML = `Reading <b>${escHtml(ENV_LABEL[envKey])}</b> Garage.<br>` +
+                     `Settings apply to both environments; vehicle lists do not.`;
+  }
+  // So a pinned tab in the taskbar is identifiable at a glance.
+  document.title = isEng() ? "Charging Tracker — Engineering" : "Charging Tracker";
+}
+
+/* Rebind storage, reload that environment's list, re-theme, re-poll. The
+   outgoing list is written first so nothing recorded during the sweep that
+   was in flight is lost. */
+async function applyEnv(key, { push = true, quiet = false } = {}){
+  if(!ENV_LABEL[key]) return false;
+  if(key === envKey){ applyEnvTheme(); return true; }
+
+  if(push && SERVED){
+    try{
+      const r = await fetch("/api/env", {
+        method : "POST",
+        headers: { "Content-Type": "application/json" },
+        body   : JSON.stringify({ env: key })
+      });
+      const d = await r.json();
+      if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      envInfo = d;
+    }catch(err){
+      notify("error", `Could not switch environment — ${escHtml(err.message)}`);
+      renderEnvSection();
+      return false;
+    }
+  }
+
+  save(KEY.veh, vehicles);
+  save(KEY.sim, simState);
+  save(KEY.simLatch, simLatch);
+
+  envKey  = key;
+  try{ localStorage.setItem("ct.env", key); }catch{}
+  KEY.veh      = vehKeyFor(key);
+  KEY.sim      = simKeyFor(key);
+  KEY.simLatch = simLatchKeyFor(key);
+
+  vehicles = load(KEY.veh, []);
+  simState = load(KEY.sim, {});
+  simLatch = load(KEY.simLatch, {});
+  filter   = "all";
+
+  applyEnvTheme();
+  await loadLiveStatus();
+  render();
+  checkGarageAuth();
+  nextAt = Date.now() + settings.intervalSec * 1000;
+
+  if(!quiet){
+    notify("info", `Switched to <b>${ENV_LABEL[key]}</b> Garage — ` +
+      `${vehicles.length} vehicle${vehicles.length === 1 ? "" : "s"} on this list`);
+  }
+  if(vehicles.length) tick();
+  return true;
+}
+
+async function loadEnv(){
+  if(!SERVED){ applyEnvTheme(); renderEnvSection(); return; }
+  try{
+    envInfo = await (await fetch("/api/env")).json();
+    // The proxy is authoritative — it may have been pinned with GARAGE_ENV,
+    // or changed from another tab since this one last looked.
+    if(envInfo.current !== envKey) await applyEnv(envInfo.current, { push:false, quiet:true });
+    else applyEnvTheme();
+  }catch{
+    applyEnvTheme();
+  }
+  renderEnvSection();
+}
+
+function setRailWarn(id, on){
+  const el = $(id);
+  if(el) el.hidden = !on;
+}
+
+function renderEnvSection(){
+  document.querySelectorAll("#envSeg button").forEach(b => {
+    b.classList.toggle("on", b.dataset.env === envKey);
+    b.disabled = !SERVED || Boolean(envInfo && envInfo.forced);
+  });
+
+  const rows = $("envRows"), hint = $("envHint");
+
+  if(!SERVED){
+    rows.innerHTML = "";
+    hint.textContent = "Open the dashboard through server.js to switch environments.";
+    setRailWarn("railWarnEnv", false);
+    return;
+  }
+  if(!envInfo){
+    rows.innerHTML = "";
+    hint.textContent = "Proxy unreachable — is server.js still running?";
+    setRailWarn("railWarnEnv", true);
+    return;
+  }
+
+  // Only the ACTIVE environment being signed out is worth a rail dot; a
+  // standby environment you have never used is not a problem to solve.
+  let attention = false;
+
+  rows.innerHTML = envInfo.environments.map(e => {
+    const cur = e.key === envInfo.current;
+    if(cur && !e.authenticated) attention = true;
+    return `
+      <div class="env-row ${cur ? "cur" : ""}">
+        <span class="name">${escHtml(e.label)}</span>
+        <span class="pill ${cur ? "ok" : "dim"}">${cur ? "Active" : "Standby"}</span>
+        <span class="host" title="${escHtml(e.garageUrl)}">${escHtml(e.garageUrl.replace(/^https:\/\//, ""))}</span>
+        ${e.authenticated
+          ? `<span class="pill ok">Signed in</span>`
+          : `<span class="pill no">Signed out</span>
+             <a class="mini" href="${escHtml(e.loginUrl)}" target="_blank" rel="noopener">Sign in</a>`}
+        <span class="pill ${e.live.ready ? "ok" : "dim"}">Live ${e.live.ready ? "on" : "off"}</span>
+      </div>`;
+  }).join("");
+
+  hint.innerHTML = envInfo.forced
+    ? `Pinned to <b>${escHtml(ENV_LABEL[envInfo.current] || envInfo.current)}</b> by the ` +
+      `<code>GARAGE_ENV</code> variable. Unset it in <code>start-dashboard.bat</code> to switch from here.`
+    : "";
+
+  setRailWarn("railWarnEnv", attention);
+}
+
+$("envSeg").addEventListener("click", async e => {
+  const btn = e.target.closest("button[data-env]");
+  if(!btn || btn.disabled) return;
+
+  const want = btn.dataset.env;
+  if(want === envKey) return;
+
+  // Peeked rather than loaded, so the count in the dialog is the real one.
+  const waiting = load(vehKeyFor(want), []);
+
+  const ok = await askConfirm({
+    title: `Switch to ${ENV_LABEL[want]}?`,
+    text : `Readings will come from <b>${want === "eng" ? "garage.dev" : "garage.vn"}.teslamotors.com</b>, ` +
+           `and the list becomes that environment's own. Nothing is lost — the current list is kept and ` +
+           `comes back when you switch home.`,
+    facts: [
+      ["Leaving",  `${ENV_LABEL[envKey]} · ${vehicles.length} vehicle${vehicles.length === 1 ? "" : "s"}`],
+      ["Entering", `${ENV_LABEL[want]} · ${waiting.length} vehicle${waiting.length === 1 ? "" : "s"}`]
+    ],
+    yes: `Switch to ${ENV_LABEL[want]}`
+  });
+
+  if(!ok){ renderEnvSection(); return; }
+  await applyEnv(want);
+  renderEnvSection();
+});
+
+/* ── Admin section rail ── */
+function showSection(name){
+  document.querySelectorAll("#adminRail .rail-item").forEach(b =>
+    b.classList.toggle("on", b.dataset.sec === name));
+  document.querySelectorAll("#adminPane .sec").forEach(s =>
+    s.classList.toggle("on", s.dataset.sec === name));
+  $("adminPane").scrollTop = 0;
+}
+
+$("adminRail").addEventListener("click", e => {
+  const btn = e.target.closest(".rail-item");
+  if(btn) showSection(btn.dataset.sec);
+});
+
+/* ───────────────────────────── Wiring: admin ───────────────────────────── */
+let unlocked = sessionStorage.getItem("ct.unlocked") === "1";
+
+function openAdmin(){
+  modal.classList.add("on"); scrim.classList.add("on");
+  syncScrollLock();
+  // Locked, the dialog is a narrow code prompt; unlocked, it widens into the
+  // section rail. One class drives the whole change.
+  modal.classList.toggle("unlocked", unlocked);
+  $("gate").hidden     = unlocked;
+  $("settings").hidden = !unlocked;
+  $("gateErr").textContent = "";
+  $("savedMsg").textContent = "";
+  if(unlocked){
+    fillSettings();
+  }else{
+    otpClear(false);
+    setTimeout(() => otpBoxes[0].focus(), 60);
+  }
+}
+$("adminBtn").addEventListener("click", openAdmin);
+
+/* ── Six-digit code entry ──────────────────────────────────────────────
+   ADMIN_PASSWORD must stay exactly 6 digits for this input to accept it. */
+const otpBoxes = Array.from(document.querySelectorAll("#otp .otp-box"));
+
+const otpValue = () => otpBoxes.map(b => b.value).join("");
+
+function otpClear(focus){
+  otpBoxes.forEach(b => { b.value = ""; b.classList.remove("filled"); });
+  if(focus) otpBoxes[0].focus();
+}
+
+function otpFill(digits){
+  otpBoxes.forEach((b, i) => {
+    b.value = digits[i] || "";
+    b.classList.toggle("filled", Boolean(b.value));
+  });
+  const nextEmpty = otpBoxes.findIndex(b => !b.value);
+  (nextEmpty === -1 ? otpBoxes[5] : otpBoxes[nextEmpty]).focus();
+  if(digits.length >= 6) tryUnlock();
+}
+
+otpBoxes.forEach((box, i) => {
+  box.addEventListener("input", () => {
+    // Keep digits only; a fast typist can land two characters in one box.
+    const digits = box.value.replace(/\D/g, "");
+    box.value = digits.slice(0, 1);
+    box.classList.toggle("filled", Boolean(box.value));
+    $("gateErr").textContent = "";
+    $("otp").classList.remove("bad");
+
+    if(digits.length > 1){ otpFill(otpValue().slice(0, i) + digits); return; }
+    if(box.value && i < 5) otpBoxes[i + 1].focus();
+    if(otpValue().length === 6) tryUnlock();
+  });
+
+  box.addEventListener("keydown", e => {
+    if(e.key === "Backspace" && !box.value && i > 0){
+      e.preventDefault();
+      otpBoxes[i - 1].value = "";
+      otpBoxes[i - 1].classList.remove("filled");
+      otpBoxes[i - 1].focus();
+    }
+    if(e.key === "ArrowLeft"  && i > 0){ e.preventDefault(); otpBoxes[i - 1].focus(); }
+    if(e.key === "ArrowRight" && i < 5){ e.preventDefault(); otpBoxes[i + 1].focus(); }
+    if(e.key === "Enter") tryUnlock();
+  });
+
+  box.addEventListener("paste", e => {
+    e.preventDefault();
+    const digits = (e.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, 6);
+    if(digits) otpFill(digits);
+  });
+
+  box.addEventListener("focus", () => box.select());
+});
+
+function tryUnlock(){
+  const code = otpValue();
+  if(code.length < 6){
+    $("gateErr").textContent = "Enter all six digits.";
+    return;
+  }
+  if(code === ADMIN_PASSWORD){
+    unlocked = true;
+    sessionStorage.setItem("ct.unlocked", "1");
+    otpClear(false);
+    $("gateErr").textContent = "";
+    $("gate").hidden = true;
+    $("settings").hidden = false;
+    modal.classList.add("unlocked");
+    fillSettings();
+  }else{
+    $("otp").classList.add("bad");
+    $("gateErr").textContent = "Incorrect code.";
+    setTimeout(() => { $("otp").classList.remove("bad"); otpClear(true); }, 420);
+  }
+}
+$("pwBtn").addEventListener("click", tryUnlock);
+
+$("lockBtn").addEventListener("click", () => {
+  unlocked = false;
+  sessionStorage.removeItem("ct.unlocked");
+  modal.classList.remove("unlocked");
+  showSection("environment");     // so the next unlock opens where it always does
+  closeAll();
+});
+
+function fillSettings(){
+  $("limitInput").value = settings.chargeLimit.toFixed(1);
+
+  const sec = settings.intervalSec;
+  if(sec % 60 === 0 && sec >= 60){
+    $("intervalInput").value = sec / 60;
+    $("intervalUnit").value  = "60";
+  }else{
+    $("intervalInput").value = sec;
+    $("intervalUnit").value  = "1";
+  }
+
+  $("concInput").value  = settings.concurrency;
+  $("spaceInput").value = settings.spacingMs;
+  $("trtInput").value   = settings.mainTrt;
+  $("autoClear").checked = settings.autoClear;
+  $("latchAfterInput").value = settings.latchAfter;
+  $("latchEveryInput").value = settings.latchEvery;
+
+  $("srcSelect").value      = settings.source;
+  $("endpointInput").value  = settings.endpoint;
+  $("endpointInput").disabled = settings.source !== "live";
+  syncChips();
+  renderSweepEstimate();
+  renderLatchEstimate();
+  loadTeamsStatus();
+  loadLiveUi();
+  loadEnv();          // re-reads the proxy, so both sign-in states are current
+}
+
+/* ── Teams webhook ─────────────────────────────────────────────────────
+   Server-side state, so this reads and writes through the proxy rather than
+   localStorage — which is also what lets each person running their own copy
+   point it at their own flow.
+
+   The proxy returns only the host, never the full URL: the signature must not
+   come back into the page. So the input stays empty and the current target is
+   shown as status text instead of being pre-filled. */
+
+const escHtml = s => String(s).replace(/[&<>"]/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" })[c]);
+
+/* ── Live vitals panel ────────────────────────────────────────────────
+   Same shape as the webhook field: the cookie lives server-side and is never
+   read back, so the box stays empty and the state is shown as text. */
+
+async function loadLiveUi(){
+  const el  = $("liveStatus");
+  const ctl = ["liveCookie", "liveToggle", "liveSaveBtn", "liveTestBtn"].map(id => $(id));
+
+  if(!SERVED){
+    ctl.forEach(c => c.disabled = true);
+    el.textContent = "Open the dashboard through server.js to use live read.";
+    return;
+  }
+
+  ctl.forEach(c => c.disabled = false);
+
+  await loadLiveStatus();
+
+  // Then probe Garage for real, rather than showing whatever the last
+  // scheduled check found — opening this panel is someone asking "is it
+  // working right now", and a 15-minute-old answer is not that.
+  if(liveState.configured){
+    const was = liveState.ready;
+    try{
+      const d = await (await fetch("/api/live/check", { method: "POST" })).json();
+      if(d && d.env){
+        liveState = d;
+        if(was && !liveState.ready && liveState.lastError){
+          notify("error", `<b>Garage cookie needs a refresh.</b> ${escHtml(liveState.lastError)}`);
+        }
+        updateLiveBubble();
+      }
+    }catch{ /* keep the status we already have */ }
+  }
+
+  $("liveToggle").checked = Boolean(liveState.enabled);
+
+  if(liveState.lastError){
+    el.innerHTML = `<b style="color:var(--red-deep)">${escHtml(liveState.lastError)}</b>`;
+  }else if(liveState.ready){
+    el.innerHTML = `Live read <b>on</b> for <b>${escHtml(ENV_LABEL[envKey])}</b> — every monitored vehicle is read in real time.`;
+  }else if(liveState.configured){
+    el.innerHTML = `<b>${escHtml(ENV_LABEL[envKey])}</b> cookie saved, live read off. Everything is using cached snapshots.`;
+  }else{
+    el.innerHTML = `No <b>${escHtml(ENV_LABEL[envKey])}</b> cookie saved. Everything is using cached snapshots.`;
+  }
+
+  // A rail dot for a cookie that just died, so it is visible without
+  // opening the section.
+  setRailWarn("railWarnLive", Boolean(liveState.lastError));
+}
+
+$("liveSaveBtn").addEventListener("click", async () => {
+  const cookie = $("liveCookie").value.trim();
+
+  // The usual mistake is grabbing one cookie out of the Application tab
+  // rather than the whole header, which drops the session and 401s.
+  if(cookie && !/_garage_session/.test(cookie)){
+    notify("error", "That doesn't contain <code>_garage_session</code> — copy the entire " +
+                    "<code>Cookie:</code> header from the Network tab, not a single cookie.");
+    return;
+  }
+
+  try{
+    const r = await fetch("/api/live", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ cookie })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+
+    $("liveCookie").value = "";
+    flashSaved(cookie ? "Cookie saved" : "Cookie cleared");
+    loadLiveUi();
+  }catch(err){
+    notify("error", `Could not save the cookie — ${err.message}`);
+  }
+});
+
+$("liveToggle").addEventListener("change", async e => {
+  const enabled = e.target.checked;
+  try{
+    const r = await fetch("/api/live", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ enabled })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    flashSaved(enabled ? "Live read on" : "Live read off");
+    loadLiveUi();
+  }catch(err){
+    e.target.checked = !enabled;      // put the switch back where it was
+    notify("error", `Could not change live read — ${err.message}`);
+  }
+});
+
+$("liveTestBtn").addEventListener("click", async () => {
+  const v = vehicles[0];
+  if(!v){ notify("error", "Add a VIN first — the test reads a real vehicle."); return; }
+
+  const btn = $("liveTestBtn"), label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Testing…";
+
+  try{
+    const r = await fetch("/api/live/test", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ vin: v.vin })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    notify("success", `Live read OK — <b>${escHtml(d.vin)}</b> USOE ${pct(d.usoe)}%` +
+      (d.soc != null ? `, SOC ${pct(d.soc)}%` : "") +
+      (d.readingAt ? ` at ${escHtml(d.readingAt)}` : ""));
+  }catch(err){
+    notify("error", `Live read failed — ${err.message}`);
+  }finally{
+    btn.disabled = false; btn.textContent = label;
+    loadLiveUi();
+  }
+});
+
+let alertState = { configured:false, hasTarget:false, muted:false, transport:"webhook" };
+
+function updateAlertBubble(){
+  const box = $("alertBubble");
+  if(!box) return;
+  const txt = $("alertBubbleText"), sub = $("alertBubbleSub"), dot = $("railWarnAlerts");
+
+  box.classList.remove("on", "bad");
+
+  if(alertState.muted){
+    // Amber-ish rather than red: muted is a deliberate choice, not a fault.
+    // It still gets a rail dot, because "why did no card arrive" is the
+    // question this state exists to answer.
+    box.classList.add("bad");
+    txt.textContent = "Muted";
+    sub.textContent = alertState.hasTarget ? "target still configured" : "";
+    if(dot){ dot.hidden = false; dot.classList.remove("ok"); }
+  }else if(alertState.configured){
+    box.classList.add("on");
+    txt.textContent = "Sending";
+    sub.textContent = `via ${alertState.transport}`;
+    if(dot){ dot.hidden = false; dot.classList.add("ok"); }
+  }else{
+    txt.textContent = "Not configured";
+    sub.textContent = "no webhook set";
+    if(dot){ dot.hidden = true; dot.classList.remove("ok"); }
+  }
+}
+
+async function loadTeamsStatus(){
+  const el  = $("teamsStatus");
+  const ctl = ["teamsInput", "teamsTestMsg", "teamsSaveBtn", "teamsTestBtn", "alertsMuted"].map(id => $(id));
+
+  if(!SERVED){
+    ctl.forEach(c => c.disabled = true);
+    el.textContent = "Open the dashboard through server.js to configure alerts.";
+    return;
+  }
+
+  try{
+    const d = await (await fetch("/api/teams")).json();
+    ctl.forEach(c => c.disabled = false);
+    alertState = d;
+    $("alertsMuted").checked = Boolean(d.muted);
+
+    if(d.muted){
+      el.innerHTML = "<b>Alerts are muted.</b> Nothing is being posted, and the " +
+                     "target below is kept exactly as it is.";
+    }else if(d.transport === "outlook"){
+      el.innerHTML = "Alerts are going out through <b>Outlook</b>, so this webhook is " +
+                     "unused. Set <code>ALERT_TRANSPORT=webhook</code> to switch back.";
+    }else if(d.configured){
+      el.innerHTML = `Posting to <b>${escHtml(d.preview)}</b>` +
+        (d.fromEnv ? " — set by <code>TEAMS_WEBHOOK_URL</code>, which overrides this field until the server restarts." : "");
+    }else{
+      el.textContent = "No webhook set — charge-complete alerts are not being sent.";
+    }
+    updateAlertBubble();
+  }catch{
+    ctl.forEach(c => c.disabled = true);
+    el.textContent = "Proxy unreachable — is server.js still running?";
+  }
+}
+
+$("alertsMuted").addEventListener("change", async e => {
+  const muted = e.target.checked;
+  try{
+    const r = await fetch("/api/teams", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ muted })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    flashSaved(muted ? "Alerts muted" : "Alerts unmuted");
+    notify("info", muted
+      ? "Alerts <b>muted</b> — no cards will be posted until this is turned back on."
+      : "Alerts <b>unmuted</b> — cards will be posted again.");
+    loadTeamsStatus();
+  }catch(err){
+    e.target.checked = !muted;          // put the switch back where it was
+    notify("error", `Could not change alert delivery — ${err.message}`);
+  }
+});
+
+$("teamsSaveBtn").addEventListener("click", async () => {
+  const url = $("teamsInput").value.trim();
+
+  if(url){
+    if(!/^https:\/\//i.test(url)){
+      notify("error", "The webhook URL must start with <b>https://</b>");
+      return;
+    }
+    // Worth blocking on rather than warning about: a URL copied through a
+    // shell gets cut at the first &, which drops the signature silently and
+    // turns every alert into a 401 that looks like a policy problem.
+    if(!/[?&]sig=/.test(url)){
+      notify("error", "That URL has no <code>sig</code> parameter — it was almost certainly " +
+                      "truncated at the first <b>&amp;</b>. Copy the whole thing from Power Automate.");
+      return;
+    }
+  }
+
+  try{
+    const r = await fetch("/api/teams", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ url })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+
+    $("teamsInput").value = "";
+    flashSaved(url ? "Webhook saved" : "Webhook cleared");
+    notify(url ? "success" : "info",
+           url ? "Teams webhook saved." : "Teams webhook cleared — alerts are off.");
+    loadTeamsStatus();
+  }catch(err){
+    notify("error", `Could not save the webhook — ${err.message}`);
+  }
+});
+
+$("teamsTestBtn").addEventListener("click", async () => {
+  const btn = $("teamsTestBtn");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+
+  try{
+    const text = $("teamsTestMsg").value.trim();
+    const r = await fetch("/api/teams/test", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ text })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    notify("success",
+      `${text ? "Message" : "Sample card"} sent via <b>${escHtml(d.transport)}</b> (HTTP ${d.status}). ` +
+      (d.mutedOverride ? "<b>Alerts are muted</b> — this test was sent anyway, but real completions will not be. " : "") +
+      `A 202 only means Power Automate accepted it — check the channel to confirm the flow posted.`);
+  }catch(err){
+    notify("error", `Test failed — ${err.message}`);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
+
+/* Spell out what the throttle means for the current list size, including
+   whether a sweep can even finish inside the refresh interval. */
+function renderSweepEstimate(){
+  const el = $("sweepEstimate");
+  const n  = vehicles.length;
+  if(!n){ el.textContent = ""; return; }
+
+  const rate    = settings.spacingMs > 0 ? 1000 / settings.spacingMs : Infinity;
+  const seconds = settings.spacingMs > 0 ? (n - 1) * settings.spacingMs / 1000 : 0;
+  const fits    = seconds < settings.intervalSec;
+
+  el.innerHTML =
+    `At ${n} vehicle${n === 1 ? "" : "s"}: about ${rate.toFixed(1)} req/s, ` +
+    `a full sweep starts in ~${seconds.toFixed(0)}s. ` +
+    (fits ? `Comfortably inside the ${settings.intervalSec}s interval.`
+          : `<b style="color:var(--red-deep)">Longer than the ${settings.intervalSec}s interval — refreshes will be skipped.</b>`);
+}
+
+function syncChips(){
+  document.querySelectorAll("#limitChips .chip").forEach(c =>
+    c.classList.toggle("on", parseFloat(c.dataset.limit) === settings.chargeLimit));
+  document.querySelectorAll("#ivChips .chip").forEach(c =>
+    c.classList.toggle("on", parseInt(c.dataset.sec, 10) === settings.intervalSec));
+  document.querySelectorAll("#latchChips .chip").forEach(c =>
+    c.classList.toggle("on",
+      parseInt(c.dataset.after, 10) === settings.latchAfter &&
+      parseInt(c.dataset.every, 10) === settings.latchEvery));
+}
+
+/* Cycles are the honest unit but not the useful one — spell out what the
+   current refresh interval turns them into. */
+function renderLatchEstimate(){
+  const el = $("latchEstimate");
+  if(!el) return;
+
+  const mins = n => {
+    const s = n * settings.intervalSec;
+    if(s < 60)   return `${Math.round(s)}s`;
+    if(s < 3600) return `${Math.round(s / 60)} min`;
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  };
+
+  const after = Math.max(1, settings.latchAfter);
+  const every = Math.max(0, settings.latchEvery);
+
+  el.innerHTML =
+    `At the current ${settings.intervalSec}s interval: first reminder about ` +
+    `<b>${mins(after)}</b> after a vehicle finishes` +
+    (every === 0 ? ", and no repeats." : `, then every <b>${mins(every)}</b> until it is unplugged.`);
+}
+
+function flashSaved(text){
+  $("savedMsg").textContent = text || "Saved";
+  setTimeout(() => { $("savedMsg").textContent = ""; }, 2200);
+}
+
+function applyLimit(val){
+  const n = parseFloat(val);
+  if(Number.isNaN(n) || n <= 0 || n > 100) return;
+  settings.chargeLimit = Math.round(n * 10) / 10;
+  save(KEY.set, settings);
+  $("limitInput").value = settings.chargeLimit.toFixed(1);
+  syncChips();
+  render();
+  flashSaved(`Target charge level set to ${pct(settings.chargeLimit)}%`);
+}
+
+function applyInterval(sec){
+  if(Number.isNaN(sec) || sec < 5) return;
+  settings.intervalSec = Math.round(sec);
+  save(KEY.set, settings);
+  schedule();
+  syncChips();
+  renderSweepEstimate();
+  renderLatchEstimate();   // reminder spacing is expressed against this
+  const s = settings.intervalSec;
+  flashSaved(`Refresh interval set to ${s % 60 === 0 && s >= 60 ? s/60 + " min" : s + " sec"}`);
+}
+
+$("limitInput").addEventListener("change", e => applyLimit(e.target.value));
+$("limitChips").addEventListener("click", e => {
+  const chip = e.target.closest(".chip");
+  if(chip) applyLimit(chip.dataset.limit);
+});
+
+function readIntervalFields(){
+  return parseFloat($("intervalInput").value) * parseInt($("intervalUnit").value, 10);
+}
+$("intervalInput").addEventListener("change", () => applyInterval(readIntervalFields()));
+$("intervalUnit").addEventListener("change",  () => applyInterval(readIntervalFields()));
+$("ivChips").addEventListener("click", e => {
+  const chip = e.target.closest(".chip");
+  if(!chip) return;
+  const sec = parseInt(chip.dataset.sec, 10);
+  if(sec % 60 === 0 && sec >= 60){ $("intervalInput").value = sec/60; $("intervalUnit").value = "60"; }
+  else                           { $("intervalInput").value = sec;    $("intervalUnit").value = "1";  }
+  applyInterval(sec);
+});
+
+$("concInput").addEventListener("change", e => {
+  const n = parseInt(e.target.value, 10);
+  if(Number.isNaN(n) || n < 1 || n > 16){ e.target.value = settings.concurrency; return; }
+  settings.concurrency = n;
+  save(KEY.set, settings);
+  renderSweepEstimate();
+  flashSaved(`Up to ${n} simultaneous request${n === 1 ? "" : "s"}`);
+});
+
+$("spaceInput").addEventListener("change", e => {
+  const n = parseInt(e.target.value, 10);
+  if(Number.isNaN(n) || n < 0 || n > 5000){ e.target.value = settings.spacingMs; return; }
+  settings.spacingMs = n;
+  save(KEY.set, settings);
+  renderSweepEstimate();
+  flashSaved(n === 0 ? "Rate gate disabled" : `Minimum ${n} ms between requests`);
+});
+
+/* Still-latched reminder cadence. */
+function applyLatch(after, every){
+  const a = parseInt(after, 10), e = parseInt(every, 10);
+  if(Number.isNaN(a) || a < 1 || a > 99 || Number.isNaN(e) || e < 0 || e > 99){
+    $("latchAfterInput").value = settings.latchAfter;
+    $("latchEveryInput").value = settings.latchEvery;
+    return;
+  }
+  settings.latchAfter = a;
+  settings.latchEvery = e;
+  save(KEY.set, settings);
+
+  $("latchAfterInput").value = a;
+  $("latchEveryInput").value = e;
+  syncChips();
+  renderLatchEstimate();
+  render();      // the per-row "reminder in N cycles" footer moves with this
+  flashSaved(e === 0
+    ? `One reminder after ${a} cycle${a === 1 ? "" : "s"}`
+    : `Reminder after ${a}, then every ${e} cycle${e === 1 ? "" : "s"}`);
+}
+
+$("latchAfterInput").addEventListener("change", () =>
+  applyLatch($("latchAfterInput").value, settings.latchEvery));
+$("latchEveryInput").addEventListener("change", () =>
+  applyLatch(settings.latchAfter, $("latchEveryInput").value));
+$("latchChips").addEventListener("click", e => {
+  const chip = e.target.closest(".chip");
+  if(chip) applyLatch(chip.dataset.after, chip.dataset.every);
+});
+
+$("trtInput").addEventListener("change", e => {
+  const n = parseInt(e.target.value, 10);
+  if(Number.isNaN(n) || n < 0){ e.target.value = settings.mainTrt; return; }
+  settings.mainTrt = n;
+  save(KEY.set, settings);
+  render();
+  flashSaved(`Main geofence set to TRT ${n}`);
+});
+
+$("autoClear").addEventListener("change", e => {
+  settings.autoClear = e.target.checked;
+  save(KEY.set, settings);
+  render();
+  flashSaved(settings.autoClear
+    ? `Completed vehicles clear after ${REMOVE_AFTER_TICKS} intervals`
+    : "Completed vehicles collect at the bottom of the list");
+});
+
+$("srcSelect").addEventListener("change", e => {
+  settings.source = e.target.value;
+  $("endpointInput").disabled = settings.source !== "live";
+  save(KEY.set, settings);
+  renderStats();
+  checkGarageAuth();
+  flashSaved(settings.source === "live" ? "Live Garage data" : "Simulation mode");
+});
+$("endpointInput").addEventListener("change", e => {
+  settings.endpoint = e.target.value.trim();
+  save(KEY.set, settings);
+  flashSaved("Endpoint saved");
+});
+
+$("clearNotesBtn").addEventListener("click", () => {
+  notes = [];
+  save(KEY.note, notes);
+  renderNotes();
+  flashSaved("Notifications cleared");
+});
+
+$("clearVehBtn").addEventListener("click", async () => {
+  if(!vehicles.length){ flashSaved("No vehicles to remove"); return; }
+
+  const ok = await askConfirm({
+    title: "Remove all vehicles?",
+    text : `Everything on the <b>${escHtml(ENV_LABEL[envKey])}</b> list stops being monitored. ` +
+           `The other environment's list is untouched.`,
+    facts: [["Environment", ENV_LABEL[envKey]], ["Removing", String(vehicles.length)]],
+    yes  : "Remove all",
+    danger: true
+  });
+  if(!ok) return;
+
+  const n = vehicles.length;
+  vehicles = []; simState = {};
+  save(KEY.veh, vehicles); save(KEY.sim, simState);
+  notify("info", `${n} vehicle${n === 1 ? "" : "s"} removed from monitoring list (admin)`);
+  render();
+  flashSaved("All vehicles removed");
+});
+
+/* ───────────────────────────── Boot ───────────────────────────── */
+// Pulse keyframes live here so the fill colours stay next to the state logic.
+const kf = document.createElement("style");
+kf.textContent = `@keyframes pulseCharge{
+  0%,100%{fill:var(--amber);   filter:drop-shadow(0 0 0 rgba(245,179,27,0))}
+  50%    {fill:var(--amber-lit);filter:drop-shadow(0 0 7px rgba(245,179,27,.72))}
+}`;
+document.head.appendChild(kf);
+
+applyEnvTheme();    // before the first paint, so nothing flashes the wrong colour
+renderNotes();
+render();
+schedule();
+checkGarageAuth();
+loadEnv();          // reconciles with the proxy, which is authoritative
+window.addEventListener("beforeunload", persistAll);
+</script>
+</body>
+</html>
